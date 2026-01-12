@@ -1,0 +1,26 @@
+[Unit]
+Description=CephFS FUSE Overlay - Transparent Storage Tiering
+After=network.target ceph-mds.target
+Requires=cephfs.mount
+After=cephfs.mount
+
+[Service]
+Type=simple
+ExecStartPre=/bin/mkdir -p /cephfs-overlay
+ExecStart=/usr/local/bin/cephfs_fuse_overlay /cephfs /cephfs-overlay --allow-other
+ExecStop=/bin/fusermount -u /cephfs-overlay
+Restart=on-failure
+RestartSec=10
+User=root
+
+# Security
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cephfs-fuse
+
+[Install]
+WantedBy=multi-user.target

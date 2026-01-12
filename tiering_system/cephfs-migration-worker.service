@@ -1,0 +1,25 @@
+[Unit]
+Description=CephFS Tiering Migration Worker
+Documentation=file:///home/cephvm/tiering_system/FINAL_DOCUMENTATION.md
+After=network.target postgresql.service cephfs-policy-engine.service
+Requires=postgresql.service
+Wants=cephfs-policy-engine.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/home/cephvm/tiering_system
+ExecStart=/usr/bin/python3 /home/cephvm/tiering_system/src/migration_worker.py --libcephfs-bin /home/cephvm/tiering_system/libcephfs_migrate --workers 5 --interval 30
+StandardOutput=journal
+StandardError=journal
+Restart=always
+RestartSec=15
+
+# Graceful shutdown
+KillMode=mixed
+KillSignal=SIGINT
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target
