@@ -15,7 +15,7 @@ from bcc import BPF
 import psycopg2
 
 # Configuration
-AGGREGATE_INTERVAL = 240  # Aggregate log → metadata every 4 minutes
+AGGREGATE_INTERVAL = 60  # Aggregate log → metadata every 60 seconds
 DB_CONFIG = {
     'host': 'localhost',
     'port': 5432,
@@ -50,15 +50,12 @@ class TieringTracker:
         try:
             self.pg_conn = psycopg2.connect(**DB_CONFIG)
             self.pg_conn.autocommit = True
-            print(f"✓ PostgreSQL connected: {DB_CONFIG['database']}", flush=True)
         except Exception as e:
             print(f"✗ PostgreSQL connection failed: {e}", flush=True)
             sys.exit(1)
     
     def setup_ebpf(self):
         """Load eBPF program using BCC"""
-        print("Loading eBPF program...", flush=True)
-        
         # Simplified eBPF code - builds path using d_path helper
         bpf_code = """
 #include <uapi/linux/ptrace.h>
@@ -133,7 +130,6 @@ int trace_write(struct pt_regs *ctx, struct kiocb *iocb) {
             self.bpf.attach_kprobe(event="ceph_read_iter", fn_name="trace_read")
             self.bpf.attach_kprobe(event="ceph_write_iter", fn_name="trace_write")
             self.bpf["events"].open_perf_buffer(self.handle_event)
-            print("✓ eBPF program loaded and attached to CephFS", flush=True)
         except Exception as e:
             print(f"✗ Failed to load eBPF: {e}", flush=True)
             sys.exit(1)
@@ -161,7 +157,6 @@ int trace_write(struct pt_regs *ctx, struct kiocb *iocb) {
                     VALUES (%s, %s, %s, %s)
                 """, (uid, inode, full_path, timestamp))
                 self.log_writes += 1
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] Logged 1 entry into DB: {full_path} (inode: {inode}, uid: {uid})", flush=True)
         except Exception as e:
             print(f"Database error: {e}", flush=True)
             self.setup_postgres()
@@ -186,14 +181,11 @@ int trace_write(struct pt_regs *ctx, struct kiocb *iocb) {
     
     def aggregator(self):
         """Background thread: Aggregate hot table → cold table"""
-        print(f"✓ Aggregator thread started (interval: {AGGREGATE_INTERVAL}s)", flush=True)
-        
         while self.running:
             time.sleep(AGGREGATE_INTERVAL)
             if not self.running:
                 break
             
-            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Aggregating log → metadata...", flush=True)
             self.aggregate_log()
     
     def aggregate_log(self):
@@ -207,8 +199,7 @@ int trace_write(struct pt_regs *ctx, struct kiocb *iocb) {
                 processed = result[0] if result else 0
                 
                 self.aggregations += 1
-                duration = time.time() - start_time
-                print(f"✓ Aggregated {processed} log entries in {duration:.2f}s", flush=True)
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] Wrote {processed} files to file_metadata. Sleeping for {AGGREGATE_INTERVAL}s", flush=True)
                 
         except Exception as e:
             print(f"✗ Aggregation error: {e}", flush=True)
@@ -234,13 +225,7 @@ int trace_write(struct pt_regs *ctx, struct kiocb *iocb) {
     
     def run(self):
         """Main event loop"""
-        print("\n" + "="*60, flush=True)
-        print("  CephFS Tiering Tracker - Phase 1", flush=True)
-        print("  eBPF → Hot Table (log) → Cold Table (metadata)", flush=True)
-        print("="*60, flush=True)
-        print(f"\nPostgreSQL: {DB_CONFIG['database']}@{DB_CONFIG['host']}", flush=True)
-        print(f"Aggregate:  Every {AGGREGATE_INTERVAL} seconds", flush=True)
-        print("\nPress Ctrl+C to stop\n", flush=True)
+        print("Monitoring started", flush=True)
         
         try:
             while self.running:
