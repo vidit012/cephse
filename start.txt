@@ -1,0 +1,196 @@
+Key: "bucket_name:object_key"
+Value: {
+    "last_user_access": timestamp,
+    "storage_class": "STANDARD"
+    "last_migration": timestamp  // Admin ops only
+}
+
+Demotion Rules:
+- Age > 30 days && class=STANDARD → Demote to STANDARD_IA
+- Age > 90 days && class=STANDARD_IA → Demote to GLACIER
+
+Promotion Rules:
+- Age < 1 day && class=GLACIER → Promote to STANDARD
+- Age < 7 days && class=STANDARD_IA → Promote to STANDARD
+- access_count > 10 in last 24h → Promote to STANDARD
+
+cat << 'EOF'
+
+═══════════════════════════════════════════════════════════
+MOVER AGENT MIGRATION - EXACT COMMANDS
+═══════════════════════════════════════════════════════════
+
+Step 1: Create empty temp file
+────────────────────────────────────────────────────────────
+sudo touch /tiercephfs/appear.txt.migrating
+
+
+Step 2: Set layout on EMPTY file (this is the key!)
+────────────────────────────────────────────────────────────
+sudo setfattr -n ceph.file.layout.pool -v cephfs.tiercephfs.cold /tiercephfs/appear.txt.migrating
+
+
+Step 3: Copy data to temp file
+────────────────────────────────────────────────────────────
+sudo cp -p /tiercephfs/appear.txt /tiercephfs/appear.txt.migrating
+
+
+Step 4: Atomic rename (instant switch!)
+────────────────────────────────────────────────────────────
+sudo mv /tiercephfs/appear.txt.migrating /tiercephfs/appear.txt
+
+
+═══════════════════════════════════════════════════════════
+THAT'S IT! File is now migrated to cold pool
+═══════════════════════════════════════════════════════════
+
+Verify:
+  getfattr -n ceph.file.layout.pool /tiercephfs/appear.txt
+
+EOF
+
+=============================================================================================================================
+server side method
+# ════════════════════════════════════════════════════════
+# STEP 1: Create test file
+# ════════════════════════════════════════════════════════
+echo 'Server-side copy test data' | sudo tee /tiercephfs/serverside_test.txt
+
+# Get original file info
+stat /tiercephfs/serverside_test.txt
+ORIG_INODE=$(stat -c '%i' /tiercephfs/serverside_test.txt)
+ORIG_INODE_HEX=$(printf '%x' $ORIG_INODE)
+ORIG_POOL=$(getfattr --only-values -n ceph.file.layout.pool /tiercephfs/serverside_test.txt)
+
+# Find objects
+rados -p $ORIG_POOL ls | grep $ORIG_INODE_HEX
+
+
+# ════════════════════════════════════════════════════════
+# STEP 2: Create shadow file (empty)
+# ════════════════════════════════════════════════════════
+sudo touch /tiercephfs/serverside_test.txt.__tiering__
+ls -l /tiercephfs/serverside_test.txt*
+
+
+# ════════════════════════════════════════════════════════
+# STEP 3: Set cold pool layout on shadow file
+# ════════════════════════════════════════════════════════
+sudo setfattr -n ceph.file.layout.pool -v cephfs.tiercephfs.cold /tiercephfs/serverside_test.txt.__tiering__
+getfattr -n ceph.file.layout.pool /tiercephfs/serverside_test.txt.__tiering__
+
+
+# ════════════════════════════════════════════════════════
+# STEP 4: Get shadow inode info
+# ════════════════════════════════════════════════════════
+SHADOW_INODE=$(stat -c '%i' /tiercephfs/serverside_test.txt.__tiering__)
+SHADOW_INODE_HEX=$(printf '%x' $SHADOW_INODE)
+
+echo "Original inode: $ORIG_INODE (hex: $ORIG_INODE_HEX)"
+echo "Shadow inode:   $SHADOW_INODE (hex: $SHADOW_INODE_HEX)"
+
+
+# ════════════════════════════════════════════════════════
+# STEP 5: Copy objects with renaming (THE KEY STEP)
+# ════════════════════════════════════════════════════════
+ORIG_POOL=cephfs.tiercephfs.data
+COLD_POOL=cephfs.tiercephfs.cold
+
+ORIG_OBJ="${ORIG_INODE_HEX}.00000000"
+SHADOW_OBJ="${SHADOW_INODE_HEX}.00000000"
+
+echo "Original object: $ORIG_OBJ"
+echo "Shadow object:   $SHADOW_OBJ"
+
+# Download from hot pool
+rados -p $ORIG_POOL get $ORIG_OBJ /tmp/obj_data
+
+# Upload to cold pool with NEW name
+rados -p $COLD_POOL put $SHADOW_OBJ /tmp/obj_data
+
+# Cleanup temp file
+rm /tmp/obj_data
+
+# Verify
+rados -p $COLD_POOL ls | grep $SHADOW_INODE_HEX
+
+
+# ════════════════════════════════════════════════════════
+# STEP 6: Update inode size metadata (CRITICAL!)
+# ════════════════════════════════════════════════════════
+# Get original file size
+ORIG_SIZE=$(stat -c '%s' /tiercephfs/serverside_test.txt)
+
+# Update shadow file size
+sudo truncate -s $ORIG_SIZE /tiercephfs/serverside_test.txt.__tiering__
+
+# Verify size updated
+stat /tiercephfs/serverside_test.txt.__tiering__
+
+# Test read
+cat /tiercephfs/serverside_test.txt.__tiering__
+
+
+# ════════════════════════════════════════════════════════
+# STEP 7: Atomic rename (instant switch!)
+# ════════════════════════════════════════════════════════
+sudo mv /tiercephfs/serverside_test.txt.__tiering__ /tiercephfs/serverside_test.txt
+
+
+# ════════════════════════════════════════════════════════
+# STEP 8: Verify migration
+# ════════════════════════════════════════════════════════
+# Check new pool
+getfattr -n ceph.file.layout.pool /tiercephfs/serverside_test.txt
+
+# Check content
+cat /tiercephfs/serverside_test.txt
+
+# Check inode changed
+stat /tiercephfs/serverside_test.txt
+
+# Wait for GC and check old objects deleted
+sleep 5
+rados -p cephfs.tiercephfs.data ls | grep $ORIG_INODE_HEX
+
+================================================================================================================================
+
+# Your complete server-side migration with attribute preservation!
+FILE="/tiercephfs/test_attributes.txt"
+SHADOW_FILE="${FILE}.__tiering__"
+ORIG_POOL="cephfs.tiercephfs.data"
+COLD_POOL="cephfs.tiercephfs.cold"
+
+# Capture attributes
+ORIG_INODE=$(stat -c '%i' "$FILE")
+ORIG_INODE_HEX=$(printf '%x' $ORIG_INODE)
+ORIG_SIZE=$(stat -c '%s' "$FILE")
+ORIG_PERMS=$(stat -c '%a' "$FILE")
+ORIG_ATIME=$(stat -c '%X' "$FILE")
+ORIG_MTIME=$(stat -c '%Y' "$FILE")
+ORIG_BTIME=$(stat -c '%W' "$FILE")
+
+# Create shadow with cold pool
+sudo touch "$SHADOW_FILE"
+sudo setfattr -n ceph.file.layout.pool -v "$COLD_POOL" "$SHADOW_FILE"
+
+# Copy objects
+SHADOW_INODE_HEX=$(printf '%x' $(stat -c '%i' "$SHADOW_FILE"))
+rados -p "$ORIG_POOL" get "${ORIG_INODE_HEX}.00000000" /tmp/obj_data
+rados -p "$COLD_POOL" put "${SHADOW_INODE_HEX}.00000000" /tmp/obj_data
+rm /tmp/obj_data
+
+# Restore attributes
+sudo truncate -s "$ORIG_SIZE" "$SHADOW_FILE"
+sudo chmod "$ORIG_PERMS" "$SHADOW_FILE"
+sudo touch -a -d "@$ORIG_ATIME" "$SHADOW_FILE"
+sudo touch -m -d "@$ORIG_MTIME" "$SHADOW_FILE"
+sudo setfattr -n user.original_birthtime -v "$ORIG_BTIME" "$SHADOW_FILE"
+
+# Atomic rename
+sudo mv "$SHADOW_FILE" "$FILE"
+
+
+
+
+ssh -p 2224 cephvm@localhost 'sudo mount -t ceph admin@7eaa5bec-e63e-11f0-8068-080027a30574.tiercephfs=/ /tiercephfs -o mon_addr=10.0.2.15:3300,secret=$(sudo cat /etc/ceph/admin.secret) && mount | grep ceph'
