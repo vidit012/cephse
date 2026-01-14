@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - [Worker-%(thread)d] - %(levelname)s - %(message)s'
+    format='- %(message)s'
 )
 logger = logging.getLogger('migration_worker')
 
@@ -34,7 +34,9 @@ class MigrationWorker:
     def get_candidates(self, conn, batch_size=100):
         """Get files that need migration"""
         cursor = conn.cursor()
-        
+
+
+
         try:
             cursor.execute("""
                 SELECT inode, path, current_pool, target_pool, last_access

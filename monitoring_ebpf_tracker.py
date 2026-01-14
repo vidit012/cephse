@@ -31,6 +31,12 @@ class TieringTracker:
         self.log_writes = 0
         self.aggregations = 0
         
+        # Batch buffer for inserts
+        self.event_buffer = []
+        self.buffer_max_size = 1000  # Flush after 1000 events
+        self.last_flush = time.time()
+        self.buffer_lock = threading.Lock()
+        
         # Setup PostgreSQL
         self.setup_postgres()
         
@@ -40,6 +46,10 @@ class TieringTracker:
         # Start aggregator thread
         self.aggregator_thread = threading.Thread(target=self.aggregator, daemon=True)
         self.aggregator_thread.start()
+        
+        # Start flush thread
+        self.flush_thread = threading.Thread(target=self.periodic_flush, daemon=True)
+        self.flush_thread.start()
         
         # Signal handlers
         signal.signal(signal.SIGINT, self.shutdown)
@@ -135,7 +145,7 @@ int trace_write(struct pt_regs *ctx, struct kiocb *iocb) {
             sys.exit(1)
     
     def handle_event(self, cpu, data, size):
-        """Handle eBPF event - Build full path and write to database"""
+        """Handle eBPF event - Buffer for batch insert"""
         event = self.bpf["events"].event(data)
         self.event_count += 1
         
@@ -149,17 +159,47 @@ int trace_write(struct pt_regs *ctx, struct kiocb *iocb) {
         if not full_path:
             full_path = filename  # Fallback to filename only
         
-        # Write to database
+        # Add to buffer instead of immediate insert
+        with self.buffer_lock:
+            self.event_buffer.append((uid, inode, full_path, timestamp))
+            
+            # Flush if buffer is full
+            if len(self.event_buffer) >= self.buffer_max_size:
+                self.flush_buffer()
+    
+    def flush_buffer(self):
+        """Flush buffered events to database (batch insert)"""
+        if not self.event_buffer:
+            return
+        
         try:
+            from psycopg2.extras import execute_values
+            
             with self.pg_conn.cursor() as cur:
-                cur.execute("""
+                # Single INSERT with multiple rows
+                execute_values(cur, """
                     INSERT INTO file_access_log (uid, inode, path, access_time)
-                    VALUES (%s, %s, %s, %s)
-                """, (uid, inode, full_path, timestamp))
-                self.log_writes += 1
+                    VALUES %s
+                """, self.event_buffer)
+                
+                self.log_writes += len(self.event_buffer)
+            
+            self.event_buffer = []
+            self.last_flush = time.time()
+            
         except Exception as e:
-            print(f"Database error: {e}", flush=True)
+            print(f"Batch insert error: {e}", flush=True)
+            self.event_buffer = []  # Clear buffer to prevent infinite retry
             self.setup_postgres()
+    
+    def periodic_flush(self):
+        """Background thread: Flush buffer every 1 second"""
+        while self.running:
+            time.sleep(1.0)
+            
+            with self.buffer_lock:
+                if self.event_buffer and (time.time() - self.last_flush) >= 1.0:
+                    self.flush_buffer()
     
     def get_full_path(self, inode):
         """Query CephFS to get full path for an inode"""
@@ -199,7 +239,7 @@ int trace_write(struct pt_regs *ctx, struct kiocb *iocb) {
                 processed = result[0] if result else 0
                 
                 self.aggregations += 1
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] Wrote {processed} files to file_metadata. Sleeping for {AGGREGATE_INTERVAL}s", flush=True)
+                print(f"Wrote {processed} files to file_metadata. Sleeping for {AGGREGATE_INTERVAL}s", flush=True)
                 
         except Exception as e:
             print(f"✗ Aggregation error: {e}", flush=True)
