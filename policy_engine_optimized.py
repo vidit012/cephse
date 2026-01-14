@@ -62,17 +62,17 @@ class PolicyEngine:
                 result = cur.fetchone()
                 
                 if result:
-                    to_warm, to_cold, to_data = result
-                    total = to_warm + to_cold + to_data
-                    return (total, to_warm, to_cold, to_data)
+                    data_to_warm, warm_to_cold, warm_to_data, cold_to_warm = result
+                    total = data_to_warm + warm_to_cold + warm_to_data + cold_to_warm
+                    return (total, data_to_warm, warm_to_cold, warm_to_data, cold_to_warm)
                 
         except psycopg2.Error as e:
             logger.error(f"Database error during policy application: {e}")
             self.reconnect()
-            return (0, 0, 0, 0)
+            return (0, 0, 0, 0, 0)
         except Exception as e:
             logger.error(f"Unexpected error: {e}")
-            return (0, 0, 0, 0)
+            return (0, 0, 0, 0, 0)
     
     def get_pool_stats(self):
         """Get file count and average age per pool"""
@@ -104,14 +104,14 @@ class PolicyEngine:
                 logger.info("="*40 + " Policy Engine Cycle Start ===")
                 
                 # Apply policies (all in database)
-                total, to_warm, to_cold, to_data = self.apply_policies()
+                total, data_to_warm, warm_to_cold, warm_to_data, cold_to_warm = self.apply_policies()
                 
                 # Log minimal statistics
                 logger.info(f"Total: {total} files marked for migration")
-                logger.info(f"{to_warm} files data -> warm")
-                logger.info(f"{to_cold} files warm -> cold")
-                logger.info(f"{to_data} files cold -> data")
-                logger.info(f"{to_data} files warm -> data")
+                logger.info(f"{data_to_warm} files data -> warm")
+                logger.info(f"{warm_to_cold} files warm -> cold")
+                logger.info(f"{warm_to_data} files warm -> data")
+                logger.info(f"{cold_to_warm} files cold -> warm")
                 logger.info(f"Sleeping for {interval} seconds...")
                 logger.info("="*40 + " Cycle Complete: " + str(total) + " files marked ===")
                 
@@ -155,3 +155,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+

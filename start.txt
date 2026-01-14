@@ -194,3 +194,31 @@ sudo mv "$SHADOW_FILE" "$FILE"
 
 
 ssh -p 2224 cephvm@localhost 'sudo mount -t ceph admin@7eaa5bec-e63e-11f0-8068-080027a30574.tiercephfs=/ /tiercephfs -o mon_addr=10.0.2.15:3300,secret=$(sudo cat /etc/ceph/admin.secret) && mount | grep ceph'
+
+
+
+Jan 14 12:29:25 cephvm:mig e. ====================================== Policy Engine Cycle Start ===
+Jan 14 12:29:25 cephvm:mig e. Total: 0 files marked for migration
+Jan 14 12:29:25 cephvm:mig e. {files} data ->warm
+Jan 14 12:29:25 cephvm:mig e. {files} warm ->cold
+Jan 14 12:29:25 cephvm:mig e. {files} cold ->data
+Jan 14 12:29:25 cephvm:mig e. {files} warm ->data
+Jan 14 12:29:25 cephvm:mig e. Sleeping for 60 seconds...
+Jan 14 12:29:25 cephvm:mig e. ====================================== Cycle Complete: 0 files marked ===
+
+scp -P 2224 /home/vidit-pt7945/cephse/policy_engine_optimized.py cephvm@localhost:/home/cephvm/tiering_system/src/
+
+so make the score in such a way that score >= 9 should remain in data pool , 
+score <=4.5 and score >=8.1 should be in the warm tier and score <4.5 in the cold pool .
+
+make sure that wherevr th file is , fom the data pool , the file should first go into the warm pool and then after that to the cold pool .
+
+so it needs to be implemented in the way that
+for files in data pool , if score < 9 demote to warm pool .
+
+for warm pool files if scoe >4.5 and less than 8.1 needs to be in the warm tier and once the score is calculated , its access frequency should be made zero.
+
+ddont start coding first tell me how this frequency based system should be , like if the score is calculated , its access frequency should be made 0 , so that it is properly evaluated in the next cycle , otherwise if a file hs access fre 12 , then in this cycle it woud be marked to remain in the data pool with no migration .
+but in the next cycle iw will again be evaluated with the same access_frequency and hence no file will move .
+i also want that once a file lands in a pool , it should atleast be in that pool for 3 minutes , only then its score 
+should be calculated.

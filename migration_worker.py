@@ -150,41 +150,25 @@ class MigrationWorker:
                 target_pool = result['target_pool']
                 last_access = result['last_access']
                 
+                # Use database function to reset frequency and update metadata
+                # This handles both inode change and same-inode cases
+                cursor.execute("""
+                    SELECT reset_file_after_migration(%s, %s, %s, %s)
+                """, (old_inode, new_inode, target_pool, last_access))
+                
+                # If inode didn't exist in metadata (new file), insert it
                 if new_inode != old_inode:
-                    # Inode changed - need to update database entries
-                    # 1. Delete old inode entry
-                    cursor.execute("""
-                        DELETE FROM file_metadata
-                        WHERE inode = %s
-                    """, (old_inode,))
-                    
-                    # 2. Insert or update new inode entry
-                    # CRITICAL: Preserve original last_access time!
-                    # Migration should NOT change access time - only user access should
                     cursor.execute("""
                         INSERT INTO file_metadata 
-                            (inode, path, current_pool, target_pool, needs_migration, last_access)
+                            (inode, path, current_pool, target_pool, needs_migration, last_access, access_freq, score)
                         VALUES 
-                            (%s, %s, %s, NULL, FALSE, %s)
-                        ON CONFLICT (inode) DO UPDATE
-                        SET path = EXCLUDED.path,
-                            current_pool = EXCLUDED.current_pool,
-                            target_pool = NULL,
-                            needs_migration = FALSE,
-                            last_access = EXCLUDED.last_access
+                            (%s, %s, %s, NULL, FALSE, %s, 0, 0.0)
+                        ON CONFLICT (inode) DO NOTHING
                     """, (new_inode, path, target_pool, last_access))
                     
-                    logger.debug(f"Database updated: inode {old_inode} → {new_inode} (preserved last_access)")
+                    logger.debug(f"Database updated: inode {old_inode} → {new_inode}, frequency reset to 0")
                 else:
-                    # Inode unchanged - simple update
-                    # Don't touch last_access!
-                    cursor.execute("""
-                        UPDATE file_metadata
-                        SET current_pool = %s,
-                            target_pool = NULL,
-                            needs_migration = FALSE
-                        WHERE inode = %s
-                    """, (target_pool, new_inode))
+                    logger.debug(f"Database updated: inode {new_inode}, frequency reset to 0")
                 
                 self.total_migrated += 1
             else:
