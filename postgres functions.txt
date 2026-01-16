@@ -492,6 +492,22 @@ tiering=>
 
 
 
+estuser1@cephvm:/tiercephfs$ dmesh
+Command 'dmesh' not found, did you mean:
+  command 'admesh' from deb admesh (0.98.5-1)
+  command 'dmesg' from deb util-linux (2.39.3-9ubuntu6.4)
+Try: apt install <deb name>
+testuser1@cephvm:/tiercephfs$ ^C
+testuser1@cephvm:/tiercephfs$ dmesg
+dmesg: read kernel buffer failed: Operation not permitted
+testuser1@cephvm:/tiercephfs$ 
+
+testuser1@cephvm:/tiercephfs$ cat testing_demo/mouse1.txt
+cat: testing_demo/mouse1.txt: Too many levels of symbolic links
+testuser1@cephvm:/tiercephfs$ 
+
+
+
 
 
 
