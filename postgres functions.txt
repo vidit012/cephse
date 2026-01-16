@@ -492,6 +492,45 @@ tiering=>
 
 
 
+tiering=> \d file_access_log;
+                                       Table "public.file_access_log"
+   Column    |           Type           | Collation | Nullable |                   Default                   
+-------------+--------------------------+-----------+----------+---------------------------------------------
+ id          | bigint                   |           | not null | nextval('file_access_log_id_seq'::regclass)
+ uid         | integer                  |           | not null | 
+ inode       | bigint                   |           | not null | 
+ path        | text                     |           | not null | 
+ access_time | timestamp with time zone |           | not null | now()
+Indexes:
+    "file_access_log_pkey" PRIMARY KEY, btree (id)
+    "idx_log_access_time" btree (access_time DESC)
+    "idx_log_inode" btree (inode)
+
+tiering=> \d file_metadata;
+                                      Table "public.file_metadata"
+        Column        |           Type           | Collation | Nullable |            Default             
+----------------------+--------------------------+-----------+----------+--------------------------------
+ inode                | bigint                   |           | not null | 
+ path                 | text                     |           | not null | 
+ current_pool         | text                     |           | not null | 'cephfs.tiercephfs.data'::text
+ target_pool          | text                     |           |          | 
+ last_access          | timestamp with time zone |           | not null | now()
+ needs_migration      | boolean                  |           |          | false
+ access_freq          | integer                  |           |          | 0
+ score                | double precision         |           |          | 0.0
+ creation_time        | timestamp with time zone |           |          | now()
+ last_evaluation_time | timestamp with time zone |           |          | 
+Indexes:
+    "file_metadata_pkey" PRIMARY KEY, btree (inode)
+    "idx_current_pool" btree (current_pool)
+    "idx_file_metadata_score" btree (score DESC)
+    "idx_last_access" btree (last_access)
+    "idx_needs_migration" btree (needs_migration, last_access) WHERE needs_migration = true
+
+tiering=> 
+
+
+
 estuser1@cephvm:/tiercephfs$ dmesh
 Command 'dmesh' not found, did you mean:
   command 'admesh' from deb admesh (0.98.5-1)
