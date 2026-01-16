@@ -82,7 +82,6 @@ struct access_event {
 };
 
 BPF_PERF_OUTPUT(events);
-BPF_HASH(dedup, u64, u64);
 
 static int track_access(struct pt_regs *ctx, struct kiocb *iocb) {
     struct file *file = iocb->ki_filp;
@@ -93,13 +92,6 @@ static int track_access(struct pt_regs *ctx, struct kiocb *iocb) {
     
     u64 ino = inode->i_ino;
     u64 now = bpf_ktime_get_ns();
-    
-    // Deduplicate: skip if accessed within last second
-    u64 *last = dedup.lookup(&ino);
-    if (last && (now - *last) < 1000000000ULL) {
-        return 0;
-    }
-    dedup.update(&ino, &now);
     
     // Prepare event
     struct access_event event = {};

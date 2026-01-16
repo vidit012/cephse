@@ -50,17 +50,14 @@ class TieringTracker:
         try:
             self.pg_conn = psycopg2.connect(**DB_CONFIG)
             self.pg_conn.autocommit = True
-            print(f"✓ PostgreSQL connected: {DB_CONFIG['database']}", flush=True)
-
+            print(f"✓ PostgreSQL connected: {DB_CONFIG['database']}")
         except Exception as e:
-            print(f"✗ PostgreSQL connection failed: {e}", flush=True)
-
+            print(f"✗ PostgreSQL connection failed: {e}")
             sys.exit(1)
     
     def setup_ebpf(self):
         """Load eBPF program using BCC"""
-        print("Loading eBPF program...", flush=True)
-
+        print("Loading eBPF program...")
         
         # Simplified BPF code for BCC
         bpf_code = """
@@ -105,20 +102,10 @@ static int track_access(struct pt_regs *ctx, struct kiocb *iocb) {
     event.pid = bpf_get_current_pid_tgid() >> 32;
     event.uid = bpf_get_current_uid_gid() & 0xFFFFFFFF;
     
-    // SKIP ROOT (UID 0) - Avoid tracking migration operations
-    if (event.uid == 0) {
-        return 0;
-    }
-    
     // Get filename
     struct dentry *dentry = file->f_path.dentry;
     if (dentry) {
         bpf_probe_read_kernel_str(&event.path, sizeof(event.path), dentry->d_name.name);
-    }
-    
-    // SKIP HIDDEN FILES (starting with .) - Ignore .swp, .tmp, etc.
-    if (event.path[0] == '.') {
-        return 0;
     }
     
     events.perf_submit(ctx, &event, sizeof(event));
@@ -135,17 +122,14 @@ int trace_write(struct pt_regs *ctx, struct kiocb *iocb) {
 """
         
         try:
-            self.bpf = BPF(text=bpf_code, cflags=["-Wno-duplicate-decl-specifier"])
+            self.bpf = BPF(text=bpf_code)
             self.bpf.attach_kprobe(event="ceph_read_iter", fn_name="trace_read")
             self.bpf.attach_kprobe(event="ceph_write_iter", fn_name="trace_write")
             self.bpf["events"].open_perf_buffer(self.handle_event)
-            print("✓ eBPF program loaded and attached to CephFS", flush=True)
-
+            print("✓ eBPF program loaded and attached to CephFS")
         except Exception as e:
-            print(f"✗ Failed to load eBPF: {e}", flush=True)
-
-            print("\nNote: Requires kernel with CephFS and BTF support", flush=True)
-
+            print(f"✗ Failed to load eBPF: {e}")
+            print("\nNote: Requires kernel with CephFS and BTF support")
             sys.exit(1)
     
     def handle_event(self, cpu, data, size):
@@ -168,8 +152,7 @@ int trace_write(struct pt_regs *ctx, struct kiocb *iocb) {
                 """, (uid, inode, path, timestamp))
                 self.log_writes += 1
         except Exception as e:
-            print(f"Database error: {e}", flush=True)
-
+            print(f"Database error: {e}")
             self.setup_postgres()
         
         if self.event_count % 100 == 0:
@@ -178,16 +161,14 @@ int trace_write(struct pt_regs *ctx, struct kiocb *iocb) {
     
     def aggregator(self):
         """Background thread: Aggregate hot table → cold table every 60 seconds"""
-        print(f"✓ Aggregator thread started (interval: {AGGREGATE_INTERVAL}s)", flush=True)
-
+        print(f"✓ Aggregator thread started (interval: {AGGREGATE_INTERVAL}s)")
         
         while self.running:
             time.sleep(AGGREGATE_INTERVAL)
             if not self.running:
                 break
             
-            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Aggregating log → metadata...", flush=True)
-
+            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Aggregating log → metadata...")
             self.aggregate_log()
     
     def aggregate_log(self):
@@ -203,61 +184,43 @@ int trace_write(struct pt_regs *ctx, struct kiocb *iocb) {
                 
                 self.aggregations += 1
                 duration = time.time() - start_time
-                print(f"✓ Aggregated {processed} log entries in {duration:.2f}s", flush=True)
-
+                print(f"✓ Aggregated {processed} log entries in {duration:.2f}s")
                 
         except Exception as e:
-            print(f"✗ Aggregation error: {e}", flush=True)
-
+            print(f"✗ Aggregation error: {e}")
             self.setup_postgres()
     
     def shutdown(self, signum, frame):
         """Graceful shutdown"""
-        print(f"\n\nShutting down... (signal {signum})", flush=True)
-
+        print(f"\n\nShutting down... (signal {signum})")
         self.running = False
         
         # Final aggregation
-        print("Final aggregation...", flush=True)
-
+        print("Final aggregation...")
         self.aggregate_log()
         
         # Cleanup
         if hasattr(self, 'pg_conn'):
             self.pg_conn.close()
         
-        print(f"\nFinal Statistics:", flush=True)
-
-        print(f"  eBPF events:      {self.event_count}", flush=True)
-
-        print(f"  Log writes:       {self.log_writes}", flush=True)
-
-        print(f"  Aggregations:     {self.aggregations}", flush=True)
-
-        print("\n✓ Shutdown complete", flush=True)
-
+        print(f"\nFinal Statistics:")
+        print(f"  eBPF events:      {self.event_count}")
+        print(f"  Log writes:       {self.log_writes}")
+        print(f"  Aggregations:     {self.aggregations}")
+        print("\n✓ Shutdown complete")
         sys.exit(0)
     
     def run(self):
         """Main event loop"""
-        print("\n" + "="*60, flush=True)
-
-        print("  CephFS Tiering Tracker - Phase 1", flush=True)
-
-        print("  eBPF → Hot Table (log) → Cold Table (metadata)", flush=True)
-
-        print("="*60, flush=True)
-
-        print(f"\nHot Table:  file_access_log (append-only)", flush=True)
-
-        print(f"Cold Table: file_metadata (aggregated)", flush=True)
-
-        print(f"PostgreSQL: {DB_CONFIG['database']}@{DB_CONFIG['host']}", flush=True)
-
-        print(f"Aggregate:  Every {AGGREGATE_INTERVAL} seconds", flush=True)
-
-        print("\nPress Ctrl+C to stop\n", flush=True)
-
+        print("\n" + "="*60)
+        print("  CephFS Tiering Tracker - Phase 1")
+        print("  eBPF → Hot Table (log) → Cold Table (metadata)")
+        print("="*60)
+        print(f"\nHot Table:  file_access_log (append-only)")
+        print(f"Cold Table: file_metadata (aggregated)")
+        print(f"PostgreSQL: {DB_CONFIG['database']}@{DB_CONFIG['host']}")
+        print(f"Aggregate:  Every {AGGREGATE_INTERVAL} seconds")
+        print("\nPress Ctrl+C to stop\n")
         
         try:
             while self.running:
@@ -268,8 +231,11 @@ int trace_write(struct pt_regs *ctx, struct kiocb *iocb) {
 if __name__ == '__main__':
     # Check if running as root
     if os.geteuid() != 0:
-        print("This program must be run as root (for eBPF)", flush=True)
-
+        print("This program must be run as root (for eBPF)")
         sys.exit(1)
     
     tracker = TieringTracker()
+    tracker.run()
+    
+    tracker = TieringTracker()
+    tracker.run()
