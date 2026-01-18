@@ -236,6 +236,3 @@ if __name__ == '__main__':
     
     tracker = TieringTracker()
     tracker.run()
-    
-    tracker = TieringTracker()
-    tracker.run()
