@@ -33,11 +33,11 @@ BEGIN
         UPDATE file_metadata
         SET needs_migration = FALSE,
             target_pool = NULL,
-            score = 0.90 * access_freq,  -- Immediately calculate score
+            score = calculate_score(access_freq),  -- Use function instead of hardcoding
             last_evaluation_time = NOW(),
-            need_eval = TRUE  -- Signal for re-evaluation
+            need_eval = TRUE
         WHERE needs_migration = TRUE
-          AND access_freq > 0  -- File was accessed after being marked
+          AND access_freq > 0
         RETURNING 1
     )
     SELECT COUNT(*) INTO cancelled_migrations FROM cancelled;
@@ -49,15 +49,15 @@ BEGIN
     -- Step 1.6: CLEANUP DUPLICATES
     SELECT cleanup_duplicate_paths() INTO duplicates_removed;
     
-    -- Step 2: Evaluate files and SET need_eval=TRUE (HANDSHAKE SIGNAL)
+    -- Step 2: Evaluate files based on their current pool
     
     -- For DATA pool: 3-minute rule
     UPDATE file_metadata
     SET 
-        score = 0.90 * access_freq,
+        score = calculate_score(access_freq),  -- Use function instead of hardcoding
         access_freq = 0,
         last_evaluation_time = NOW(),
-        need_eval = TRUE  -- HANDSHAKE: Signal "ready for policy decision"
+        need_eval = TRUE
     WHERE current_pool = 'cephfs.tiercephfs.data'
       AND needs_migration = FALSE
       AND (
@@ -69,10 +69,10 @@ BEGIN
     -- For WARM pool: immediate if accessed, 3-minute rule if not
     UPDATE file_metadata
     SET 
-        score = 0.90 * access_freq,
+        score = calculate_score(access_freq),  -- Use function instead of hardcoding
         access_freq = 0,
         last_evaluation_time = NOW(),
-        need_eval = TRUE  -- HANDSHAKE: Signal "ready for policy decision"
+        need_eval = TRUE
     WHERE current_pool = 'cephfs.tiercephfs.warm'
       AND needs_migration = FALSE
       AND (
@@ -88,10 +88,10 @@ BEGIN
     -- For COLD pool: immediate if accessed
     UPDATE file_metadata
     SET 
-        score = 0.90 * access_freq,
+        score = calculate_score(access_freq),  -- Use function instead of hardcoding
         access_freq = 0,
         last_evaluation_time = NOW(),
-        need_eval = TRUE  -- HANDSHAKE: Signal "ready for policy decision"
+        need_eval = TRUE
     WHERE current_pool = 'cephfs.tiercephfs.cold'
       AND needs_migration = FALSE
       AND access_freq > 0;
@@ -102,6 +102,8 @@ BEGIN
 END;
 $function$
 tiering=# 
+
+
 
 
 
@@ -261,4 +263,19 @@ BEGIN
 END;
 $function$
 tiering=# 
+
+
+tiering=# \sf calculate_score 
+CREATE OR REPLACE FUNCTION public.calculate_score(access_frequency integer, last_access_time timestamp with time zone DEFAULT NULL::timestamp with time zone)
+ RETURNS double precision
+ LANGUAGE plpgsql
+ IMMUTABLE
+AS $function$
+BEGIN
+    RETURN 0.80 * access_frequency::FLOAT;
+END;
+$function$
+tiering=# 
+
+
 
