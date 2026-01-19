@@ -1,0 +1,264 @@
+tiering=# \sf aggregate_access_log 
+CREATE OR REPLACE FUNCTION public.aggregate_access_log()
+ RETURNS integer
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    total_files INTEGER := 0;
+    cancelled_migrations INTEGER := 0;
+    duplicates_removed INTEGER := 0;
+BEGIN
+    -- Step 1: Accumulate new accesses and count unique files
+    WITH upsert_result AS (
+        INSERT INTO file_metadata (inode, path, last_access, access_freq, creation_time)
+        SELECT 
+            fal.inode,
+            fal.path,
+            MAX(fal.access_time) as last_access,
+            GREATEST(1, COUNT(*) / 2) as new_accesses,
+            MIN(fal.access_time) as creation_time
+        FROM file_access_log fal
+        GROUP BY fal.inode, fal.path
+        ON CONFLICT (inode) DO UPDATE
+        SET 
+            last_access = EXCLUDED.last_access,
+            access_freq = file_metadata.access_freq + EXCLUDED.access_freq,
+            path = EXCLUDED.path
+        RETURNING 1
+    )
+    SELECT COUNT(*) INTO total_files FROM upsert_result;
+    
+    -- Step 1.5: CANCEL MIGRATION for files that were accessed after being marked
+    WITH cancelled AS (
+        UPDATE file_metadata
+        SET needs_migration = FALSE,
+            target_pool = NULL,
+            score = 0.90 * access_freq,  -- Immediately calculate score
+            last_evaluation_time = NOW(),
+            need_eval = TRUE  -- Signal for re-evaluation
+        WHERE needs_migration = TRUE
+          AND access_freq > 0  -- File was accessed after being marked
+        RETURNING 1
+    )
+    SELECT COUNT(*) INTO cancelled_migrations FROM cancelled;
+    
+    IF cancelled_migrations > 0 THEN
+        RAISE NOTICE '✓ Cancelled % migrations due to new accesses', cancelled_migrations;
+    END IF;
+    
+    -- Step 1.6: CLEANUP DUPLICATES
+    SELECT cleanup_duplicate_paths() INTO duplicates_removed;
+    
+    -- Step 2: Evaluate files and SET need_eval=TRUE (HANDSHAKE SIGNAL)
+    
+    -- For DATA pool: 3-minute rule
+    UPDATE file_metadata
+    SET 
+        score = 0.90 * access_freq,
+        access_freq = 0,
+        last_evaluation_time = NOW(),
+        need_eval = TRUE  -- HANDSHAKE: Signal "ready for policy decision"
+    WHERE current_pool = 'cephfs.tiercephfs.data'
+      AND needs_migration = FALSE
+      AND (
+          (last_evaluation_time IS NULL AND NOW() - creation_time >= INTERVAL '3 minutes')
+          OR
+          (last_evaluation_time IS NOT NULL AND NOW() - last_evaluation_time >= INTERVAL '3 minutes')
+      );
+    
+    -- For WARM pool: immediate if accessed, 3-minute rule if not
+    UPDATE file_metadata
+    SET 
+        score = 0.90 * access_freq,
+        access_freq = 0,
+        last_evaluation_time = NOW(),
+        need_eval = TRUE  -- HANDSHAKE: Signal "ready for policy decision"
+    WHERE current_pool = 'cephfs.tiercephfs.warm'
+      AND needs_migration = FALSE
+      AND (
+          (access_freq > 0)
+          OR
+          (access_freq = 0 AND (
+              (last_evaluation_time IS NULL AND NOW() - creation_time >= INTERVAL '3 minutes')
+              OR
+              (last_evaluation_time IS NOT NULL AND NOW() - last_evaluation_time >= INTERVAL '3 minutes')
+          ))
+      );
+    
+    -- For COLD pool: immediate if accessed
+    UPDATE file_metadata
+    SET 
+        score = 0.90 * access_freq,
+        access_freq = 0,
+        last_evaluation_time = NOW(),
+        need_eval = TRUE  -- HANDSHAKE: Signal "ready for policy decision"
+    WHERE current_pool = 'cephfs.tiercephfs.cold'
+      AND needs_migration = FALSE
+      AND access_freq > 0;
+    
+    DELETE FROM file_access_log;
+    
+    RETURN total_files;
+END;
+$function$
+tiering=# 
+
+
+
+tiering=# \sf apply_tiering_policies 
+CREATE OR REPLACE FUNCTION public.apply_tiering_policies()
+ RETURNS TABLE(to_warm_from_data bigint, to_cold_from_warm bigint, to_data_from_warm bigint, to_warm_from_cold bigint, stayed_in_warm bigint)
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    warm_from_data BIGINT := 0;
+    cold_from_warm BIGINT := 0;
+    data_from_warm BIGINT := 0;
+    warm_from_cold BIGINT := 0;
+    stayed_warm BIGINT := 0;
+BEGIN
+    -- Rule 1: DATA → WARM (score < 9)
+    WITH updated AS (
+        UPDATE file_metadata
+        SET target_pool = 'cephfs.tiercephfs.warm',
+            needs_migration = TRUE,
+            need_eval = FALSE
+        WHERE current_pool = 'cephfs.tiercephfs.data'
+          AND score < 9
+          AND needs_migration = FALSE
+          AND need_eval = TRUE
+        RETURNING 1
+    )
+    SELECT COUNT(*) INTO warm_from_data FROM updated;
+
+    -- Rule 2: WARM → COLD (score < 4.5)
+    -- REMOVED: 3-minute wait check - aggregator handles timing via need_eval flag
+    WITH updated AS (
+        UPDATE file_metadata
+        SET target_pool = 'cephfs.tiercephfs.cold',
+            needs_migration = TRUE,
+            need_eval = FALSE
+        WHERE current_pool = 'cephfs.tiercephfs.warm'
+          AND score < 4.5
+          AND needs_migration = FALSE
+          AND need_eval = TRUE  -- Aggregator sets this when file is ready
+        RETURNING 1
+    )
+    SELECT COUNT(*) INTO cold_from_warm FROM updated;
+
+    -- Rule 3: WARM → DATA (score >= 9)
+    WITH updated AS (
+        UPDATE file_metadata
+        SET target_pool = 'cephfs.tiercephfs.data',
+            needs_migration = TRUE,
+            need_eval = FALSE
+        WHERE current_pool = 'cephfs.tiercephfs.warm'
+          AND score >= 9
+          AND needs_migration = FALSE
+          AND need_eval = TRUE
+        RETURNING 1
+    )
+    SELECT COUNT(*) INTO data_from_warm FROM updated;
+
+    -- Rule 4: COLD → WARM (any access)
+    WITH updated AS (
+        UPDATE file_metadata
+        SET target_pool = 'cephfs.tiercephfs.warm',
+            needs_migration = TRUE,
+            need_eval = FALSE
+        WHERE current_pool = 'cephfs.tiercephfs.cold'
+          AND score > 0
+          AND needs_migration = FALSE
+          AND need_eval = TRUE
+        RETURNING 1
+    )
+    SELECT COUNT(*) INTO warm_from_cold FROM updated;
+
+    -- Rule 5: WARM stays WARM (4.5 <= score < 9)
+    WITH updated AS (
+        UPDATE file_metadata
+        SET need_eval = FALSE
+        WHERE current_pool = 'cephfs.tiercephfs.warm'
+          AND score >= 4.5
+          AND score < 9
+          AND needs_migration = FALSE
+          AND need_eval = TRUE
+        RETURNING 1
+    )
+    SELECT COUNT(*) INTO stayed_warm FROM updated;
+    
+    -- Acknowledge ALL remaining files with need_eval=TRUE
+    UPDATE file_metadata
+    SET need_eval = FALSE
+    WHERE need_eval = TRUE
+      AND needs_migration = FALSE;
+
+    RETURN QUERY SELECT warm_from_data, cold_from_warm, data_from_warm, warm_from_cold, stayed_warm;
+END;
+$function$
+tiering=# 
+
+tiering=# \sf reset_file_after_migration 
+CREATE OR REPLACE FUNCTION public.reset_file_after_migration(old_inode_param bigint, new_inode_param bigint, new_pool_param text, preserved_last_access timestamp with time zone)
+ RETURNS void
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    old_creation_time TIMESTAMP WITH TIME ZONE;
+    old_score DOUBLE PRECISION;
+    old_path TEXT;
+BEGIN
+    -- Handle inode change (capture old values before deleting)
+    IF old_inode_param != new_inode_param THEN
+        SELECT creation_time, score, path
+        INTO old_creation_time, old_score, old_path
+        FROM file_metadata WHERE inode = old_inode_param;
+        
+        DELETE FROM file_metadata WHERE inode = old_inode_param;
+        
+        -- Insert new entry with preserved values
+        INSERT INTO file_metadata (
+            inode, path, current_pool, target_pool, last_access,
+            needs_migration, access_freq, score, creation_time,
+            last_evaluation_time, need_eval
+        )
+        VALUES (
+            new_inode_param,
+            old_path,
+            new_pool_param,
+            NULL,
+            preserved_last_access,
+            FALSE,
+            0,
+            COALESCE(old_score, 0.0),  -- PRESERVE SCORE!
+            COALESCE(old_creation_time, NOW()),
+            NOW(),
+            FALSE  -- Reset handshake flag after migration
+        )
+        ON CONFLICT (inode) DO UPDATE SET
+            current_pool = EXCLUDED.current_pool,
+            target_pool = NULL,
+            needs_migration = FALSE,
+            access_freq = 0,
+            last_access = EXCLUDED.last_access,
+            score = EXCLUDED.score,  -- PRESERVE SCORE!
+            creation_time = EXCLUDED.creation_time,
+            last_evaluation_time = EXCLUDED.last_evaluation_time,
+            need_eval = FALSE;
+    ELSE
+        -- Same inode case - just update pool and reset flags
+        UPDATE file_metadata
+        SET current_pool = new_pool_param,
+            target_pool = NULL,
+            needs_migration = FALSE,
+            access_freq = 0,
+            last_access = preserved_last_access,
+            last_evaluation_time = NOW(),
+            need_eval = FALSE  -- Reset handshake flag after migration
+            -- SCORE stays constant!
+        WHERE inode = new_inode_param;
+    END IF;
+END;
+$function$
+tiering=# 
+

@@ -41,7 +41,7 @@ sudo mv /tiercephfs/appear.txt.migrating /tiercephfs/appear.txt
 
 
 ═══════════════════════════════════════════════════════════
-THAT'S IT! File is now migrated to cold pool
+THAT'S IT! File is now migrated to cold poole
 ═══════════════════════════════════════════════════════════
 
 Verify:
@@ -222,3 +222,23 @@ ddont start coding first tell me how this frequency based system should be , lik
 but in the next cycle iw will again be evaluated with the same access_frequency and hence no file will move .
 i also want that once a file lands in a pool , it should atleast be in that pool for 3 minutes , only then its score 
 should be calculated.
+
+
+
+ok , so create 4 new files 
+one in hot pool , and 2 in warm pool and one in cold pool.
+
+access the hot file 4 times and see if it is migrated to the warm pool.
+
+acess the first warm file 15 times and see i it is marked for data pool.
+
+dont access the second fie in the warm pool and see if it is marked for cold pool.
+
+access the file in the cold pool once and it should b migrated to th data pool.
+
+create file in data pool and access it 12 times and see in the first cycle , it should remain in the data pool.
+create second file in the data pool and access i 4 times , it should move to the  warm pool.
+
+ater the second cycle , see that the file which was moved to the warn pool , access it 10 times and see if it moves to the data pool.
+
+amd the file which moved to the warm pool , no should be in the cold pool.
