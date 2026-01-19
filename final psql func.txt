@@ -9,21 +9,31 @@ DECLARE
     duplicates_removed INTEGER := 0;
 BEGIN
     -- Step 1: Accumulate new accesses and count unique files
-    WITH upsert_result AS (
+    -- FIX: Group by inode only, use subquery to get latest path per inode
+    WITH latest_paths AS (
+        SELECT DISTINCT ON (inode)
+            inode,
+            path,
+            access_time
+        FROM file_access_log
+        ORDER BY inode, access_time DESC
+    ),
+    upsert_result AS (
         INSERT INTO file_metadata (inode, path, last_access, access_freq, creation_time)
         SELECT 
             fal.inode,
-            fal.path,
+            lp.path,  -- Use the latest path from renamed files
             MAX(fal.access_time) as last_access,
             GREATEST(1, COUNT(*) / 2) as new_accesses,
             MIN(fal.access_time) as creation_time
         FROM file_access_log fal
-        GROUP BY fal.inode, fal.path
+        JOIN latest_paths lp ON fal.inode = lp.inode
+        GROUP BY fal.inode, lp.path  -- Still need lp.path in GROUP BY for PostgreSQL
         ON CONFLICT (inode) DO UPDATE
         SET 
             last_access = EXCLUDED.last_access,
             access_freq = file_metadata.access_freq + EXCLUDED.access_freq,
-            path = EXCLUDED.path
+            path = EXCLUDED.path  -- Update to latest path
         RETURNING 1
     )
     SELECT COUNT(*) INTO total_files FROM upsert_result;
@@ -33,7 +43,7 @@ BEGIN
         UPDATE file_metadata
         SET needs_migration = FALSE,
             target_pool = NULL,
-            score = calculate_score(access_freq),  -- Use function instead of hardcoding
+            score = calculate_score(access_freq),
             last_evaluation_time = NOW(),
             need_eval = TRUE
         WHERE needs_migration = TRUE
@@ -54,7 +64,7 @@ BEGIN
     -- For DATA pool: 3-minute rule
     UPDATE file_metadata
     SET 
-        score = calculate_score(access_freq),  -- Use function instead of hardcoding
+        score = calculate_score(access_freq),
         access_freq = 0,
         last_evaluation_time = NOW(),
         need_eval = TRUE
@@ -69,7 +79,7 @@ BEGIN
     -- For WARM pool: immediate if accessed, 3-minute rule if not
     UPDATE file_metadata
     SET 
-        score = calculate_score(access_freq),  -- Use function instead of hardcoding
+        score = calculate_score(access_freq),
         access_freq = 0,
         last_evaluation_time = NOW(),
         need_eval = TRUE
@@ -88,7 +98,7 @@ BEGIN
     -- For COLD pool: immediate if accessed
     UPDATE file_metadata
     SET 
-        score = calculate_score(access_freq),  -- Use function instead of hardcoding
+        score = calculate_score(access_freq),
         access_freq = 0,
         last_evaluation_time = NOW(),
         need_eval = TRUE
@@ -102,7 +112,6 @@ BEGIN
 END;
 $function$
 tiering=# 
-
 
 
 
