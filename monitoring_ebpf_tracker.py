@@ -90,6 +90,15 @@ static int track_access(struct pt_regs *ctx, struct kiocb *iocb) {
     struct inode *inode = file->f_inode;
     if (!inode) return 0;
     
+    // SKIP SYMLINKS: Check if this inode is a symlink
+    // S_IFLNK = 0120000 (octal), we check the file mode
+    u16 mode = inode->i_mode;
+    if ((mode & 0170000) == 0120000) {
+        // This is a symlink inode - skip it
+        // The kernel should have already resolved it, but if we see it, ignore
+        return 0;
+    }
+    
     u64 ino = inode->i_ino;
     u64 now = bpf_ktime_get_ns();
     
