@@ -32,3 +32,8 @@ SELECT
 FROM file_metadata 
 WHERE path = '$BASENAME';
 EOF
+
+
+# scp -P 2224 /home/vidit-pt7945/cephse/filest.sh cephvm@localhost:/tmp/ && ssh -p 2224 cephvm@localhost "sudo mv /tmp/filest.sh /usr/local/bin/filest && sudo chmod +x /usr/local/bin/filest"
+
+
