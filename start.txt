@@ -242,3 +242,95 @@ create second file in the data pool and access i 4 times , it should move to the
 ater the second cycle , see that the file which was moved to the warn pool , access it 10 times and see if it moves to the data pool.
 
 amd the file which moved to the warm pool , no should be in the cold pool.
+
+============================================
+
+
+
+ssh -p 2224 cephvm@localhost
+cd /tiercephfs
+
+# Step 1: Create and access file
+echo "original content" > test_mv.txt
+cat test_mv.txt
+echo "Waiting 75s for tracking..."
+sleep 75
+
+# Step 2: Check it's tracked
+filest test_mv.txt
+
+# Step 3: Rename the file
+mv test_mv.txt test_mv_renamed.txt
+
+# Step 4: Access renamed file
+cat test_mv_renamed.txt
+echo "Waiting 75s for path update..."
+sleep 75
+
+# Step 5: Check results
+echo "=== Old path (should be empty) ==="
+filest test_mv.txt
+
+echo "=== New path (should show updated entry) ==="
+filest test_mv_renamed.txt
+
+=======================================================================
+
+# Already in VM at /tiercephfs
+
+# Step 1: Create and access original file
+echo "original content" > test_copy_original.txt
+cat test_copy_original.txt
+echo "Waiting 75s for tracking..."
+sleep 75
+
+# Step 2: Check original is tracked
+filest test_copy_original.txt
+
+# Step 3: Copy the file (creates new inode)
+cp test_copy_original.txt test_copy_new.txt
+ls -li test_copy_original.txt test_copy_new.txt  # See different inodes
+
+# Step 4: Access the copied file
+cat test_copy_new.txt
+echo "Waiting 75s for tracking..."
+sleep 75
+
+# Step 5: Check both files
+echo "=== Original file ==="
+filest test_copy_original.txt
+
+echo "=== Copied file (should be separate entry) ==="
+filest test_copy_new.txt
+
+==============================================================================
+
+ssh -p 2224 cephvm@localhost
+cd /tiercephfs
+
+# Step 1: Create target file and access it
+echo "target file content" > target_file.txt
+cat target_file.txt
+echo "Waiting 75s for tracking..."
+sleep 75
+
+# Step 2: Check target file is tracked
+filest target_file.txt
+# Should show: access_freq = 1
+
+# Step 3: Create symlink
+ln -s target_file.txt my_symlink.txt
+ls -li target_file.txt my_symlink.txt
+# Note: Different inodes!
+
+# Step 4: Access file VIA SYMLINK
+cat my_symlink.txt
+echo "Waiting 75s..."
+sleep 75
+
+# Step 5: Check both
+echo "=== Symlink (should NOT be tracked) ==="
+filest my_symlink.txt
+
+echo "=== Target file (should have access_freq = 2) ==="
+filest target_file.txt

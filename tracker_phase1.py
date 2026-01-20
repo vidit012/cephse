@@ -81,7 +81,15 @@ struct access_event {
     char path[256];
 };
 
+struct delete_event {
+    u64 inode;
+    u32 pid;
+    u32 uid;
+    char path[256];
+};
+
 BPF_PERF_OUTPUT(events);
+BPF_PERF_OUTPUT(deletions);
 
 static int track_access(struct pt_regs *ctx, struct kiocb *iocb) {
     struct file *file = iocb->ki_filp;
@@ -125,6 +133,49 @@ int trace_read(struct pt_regs *ctx, struct kiocb *iocb) {
 int trace_write(struct pt_regs *ctx, struct kiocb *iocb) {
     return track_access(ctx, iocb);
 }
+
+// Track file deletions via unlink/unlinkat syscalls
+TRACEPOINT_PROBE(syscalls, sys_enter_unlink) {
+    struct delete_event event = {};
+    u32 uid = bpf_get_current_uid_gid() & 0xFFFFFFFF;
+    
+    // Skip root (migration operations)
+    if (uid == 0) return 0;
+    
+    event.uid = uid;
+    event.pid = bpf_get_current_pid_tgid() >> 32;
+    event.inode = 0;
+    
+    // Get filename from syscall argument
+    bpf_probe_read_user_str(&event.path, sizeof(event.path), (void *)args->pathname);
+    
+    // Skip hidden files
+    if (event.path[0] == '.') return 0;
+    
+    deletions.perf_submit(args, &event, sizeof(event));
+    return 0;
+}
+
+TRACEPOINT_PROBE(syscalls, sys_enter_unlinkat) {
+    struct delete_event event = {};
+    u32 uid = bpf_get_current_uid_gid() & 0xFFFFFFFF;
+    
+    // Skip root (migration operations)
+    if (uid == 0) return 0;
+    
+    event.uid = uid;
+    event.pid = bpf_get_current_pid_tgid() >> 32;
+    event.inode = 0;
+    
+    // Get filename from syscall argument
+    bpf_probe_read_user_str(&event.path, sizeof(event.path), (void *)args->pathname);
+    
+    // Skip hidden files
+    if (event.path[0] == '.') return 0;
+    
+    deletions.perf_submit(args, &event, sizeof(event));
+    return 0;
+}
 """
         
         try:
@@ -132,6 +183,8 @@ int trace_write(struct pt_regs *ctx, struct kiocb *iocb) {
             self.bpf.attach_kprobe(event="ceph_read_iter", fn_name="trace_read")
             self.bpf.attach_kprobe(event="ceph_write_iter", fn_name="trace_write")
             self.bpf["events"].open_perf_buffer(self.handle_event)
+            self.bpf["deletions"].open_perf_buffer(self.handle_deletion)
+            print("✓ eBPF program loaded with deletion tracking", flush=True)
         except Exception as e:
             print(f"✗ Failed to load eBPF: {e}", flush=True)
             sys.exit(1)
@@ -158,6 +211,42 @@ int trace_write(struct pt_regs *ctx, struct kiocb *iocb) {
             # Flush if buffer is full
             if len(self.event_buffer) >= self.buffer_max_size:
                 self.flush_buffer()
+    
+    def handle_deletion(self, cpu, data, size):
+        """Handle file deletion event - Remove from database immediately"""
+        event = self.bpf["deletions"].event(data)
+        
+        filename = event.path.decode('utf-8', errors='ignore')
+        
+        # Delete from BOTH tables to handle race condition
+        try:
+            with self.pg_conn.cursor() as cur:
+                # Delete from file_metadata (if already aggregated)
+                cur.execute("""
+                    DELETE FROM file_metadata 
+                    WHERE path = %s
+                    RETURNING path
+                """, (filename,))
+                
+                deleted_metadata = cur.fetchone()
+                
+                # Also delete from file_access_log (if pending aggregation)
+                cur.execute("""
+                    DELETE FROM file_access_log 
+                    WHERE path = %s
+                    RETURNING path
+                """, (filename,))
+                
+                deleted_log = cur.fetchone()
+                
+                if deleted_metadata or deleted_log:
+                    print(f"✓ Removed deleted file: {filename} (metadata: {bool(deleted_metadata)}, log: {bool(deleted_log)})", flush=True)
+            
+            self.pg_conn.commit()
+            
+        except Exception as e:
+            print(f"✗ Error removing deleted file {filename}: {e}", flush=True)
+            self.setup_postgres()
     
     def flush_buffer(self):
         """Flush buffered events to database (batch insert)"""

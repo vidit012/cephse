@@ -12,10 +12,8 @@ fi
 
 FILENAME="$1"
 
-# Extract just the filename (basename) for search
-BASENAME=$(basename "$FILENAME")
-
-echo "Checking tiering status for: $BASENAME"
+# Use the exact path as provided by user
+echo "Checking tiering status for: $FILENAME"
 echo "========================================="
 
 sudo -u postgres psql -d tiering << EOF
@@ -30,7 +28,7 @@ SELECT
     creation_time,
     need_eval
 FROM file_metadata 
-WHERE path = '$BASENAME';
+WHERE path = '$FILENAME';
 EOF
 
 
