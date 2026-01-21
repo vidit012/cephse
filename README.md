@@ -1,6 +1,34 @@
 # CephFS Automated Tiering System
 
-Production-grade storage tiering system for CephFS with eBPF-based access tracking, PostgreSQL hot/cold tables, and automated migration between SSD and HDD pools.
+Storage tiering system for CephFS with eBPF-based access tracking, Postgres hot/cold tables, and automated migration between hot, warm and cold pools.
+
+## 🎯 Dual-Mode Tiering System
+
+This system supports **two tiering policy modes** that can be switched dynamically:
+
+### Mode 1: Access Frequency-Based (Score-Based)
+- **Algorithm**: `score = 0.90 × access_freq`
+- **Philosophy**: Hot data stays hot based on usage patterns
+- **Use Case**: Workloads where frequently-accessed files should remain in fast storage regardless of age
+- **Promotion**: Files with score ≥ 9 move to hot tier (DATA pool)
+- **Demotion**: Files with score < 4.5 move to cold tier
+
+### Mode 2: Last Access Time-Based (Age-Based)
+- **Algorithm**: Time threshold-based (3 minutes for warm, 6 minutes for cold)
+- **Philosophy**: Old data moves to cold storage automatically
+- **Use Case**: Workloads where recent access is more important than total access count
+- **Promotion**: Accessed files immediately move to hot tier (DATA pool)
+- **Demotion**: Files idle for 3+ minutes demote to warm, 6+ minutes demote to cold
+
+### Switching Between Modes
+```bash
+switch_tiering frequency  # Enable score-based mode
+switch_tiering time       # Enable time-based mode
+switch_tiering status     # Check current mode
+switch_tiering off        # Disable tiering
+```
+
+Both modes share the same infrastructure (eBPF tracker, aggregator, migration worker) - only the policy engine logic changes.
 
 ## Architecture
 
@@ -43,12 +71,15 @@ Production-grade storage tiering system for CephFS with eBPF-based access tracki
 
 ## Key Features
 
-✅ **Full Path Support**: Works with files in subdirectories  
-✅ **Zero Data Loss**: ID-based watermark prevents loss during aggregation  
-✅ **Inode Tracking**: Handles inode changes from shadow file migration  
-✅ **Timestamp Preservation**: last_access time maintained across migrations  
-✅ **Minimal Logging**: Clean, concise output (3 lines per cycle)  
-✅ **Test Mode**: 3 minutes = 30 days for rapid testing  
+✅ **Dual-Mode Tiering**: Switch between frequency-based and time-based policies dynamically  
+✅ **Batch Processing**: 1000-event batches for 100x faster writes  
+✅ **Parallel Migration**: 5 concurrent workers with lock-free execution  
+✅ **Inode-Based Tracking**: Files tracked by inode, not path  
+  - **File moved**: Path updated automatically  
+  - **File copied**: Treated as separate file (different inode)  
+  - **Symlink created**: Target file's access frequency recorded  
+✅ **Zero Data Loss**: Watermark-based aggregation during concurrent writes  
+✅ **Shadow File Migration**: Atomic pool changes with inode tracking  
 
 ## Components
 
@@ -304,14 +335,6 @@ END;
 $$;
 EOSQL
 
-# Grant permissions
-sudo -u postgres psql tiering <<EOF
-GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO tiering_user;
-GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO tiering_user;
-GRANT EXECUTE ON FUNCTION aggregate_access_log() TO tiering_user;
-EOF
-```
-
 ### Build libcephfs_migrate
 
 ```bash
@@ -388,91 +411,7 @@ sudo journalctl -u cephfs-migration-worker -f
 # ✓ Migrated key/tea.txt in 4998ms (inode: 1099511629379 → 1099511629380)
 ```
 
-### Query Database
 
-```bash
-# Connect to database
-sudo -u postgres psql tiering
-
-# View all tracked files
-SELECT inode, path, current_pool, last_access 
-FROM file_metadata 
-ORDER BY last_access DESC 
-LIMIT 10;
-
-# Files pending migration
-SELECT inode, path, current_pool, target_pool, last_access
-FROM file_metadata 
-WHERE needs_migration = TRUE;
-
-# Count files per pool
-SELECT current_pool, COUNT(*) as file_count
-FROM file_metadata 
-GROUP BY current_pool;
-
-# Hot table size (should stay small due to 60s aggregation)
-SELECT COUNT(*) as pending_events FROM file_access_log;
-```
-
-### Manual Testing
-
-```bash
-# Create test file
-sudo -u testuser1 echo "test data" > /tiercephfs/testfile.txt
-
-# Wait 60s for aggregation
-sleep 60
-
-# Check if tracked
-sudo -u postgres psql tiering -c \
-  "SELECT * FROM file_metadata WHERE path = 'testfile.txt';"
-
-# Wait 3+ minutes for promotion (test mode: 3 min = 30 days)
-sleep 180
-
-# Check migration status
-sudo -u postgres psql tiering -c \
-  "SELECT * FROM file_metadata WHERE path = 'testfile.txt';"
-
-# Should show: target_pool = 'cephfs.tiercephfs.warm', needs_migration = TRUE
-
-# Wait for migration worker
-sleep 30
-
-# Verify migrated
-sudo -u postgres psql tiering -c \
-  "SELECT * FROM file_metadata WHERE path = 'testfile.txt';"
-
-# Should show: current_pool = 'cephfs.tiercephfs.warm', needs_migration = FALSE
-
-# Verify file still accessible
-cat /tiercephfs/testfile.txt  # Should work!
-
-# Check actual pool
-getfattr -n ceph.file.layout /tiercephfs/testfile.txt
-```
-
-## Configuration
-
-### Adjust Test Mode Intervals
-
-**Policy Engine** (`policy_engine.py`):
-```python
-# Current: 3 minutes = 30 days
-TEST_MODE_MULTIPLIER = 10  # 1 minute = 10 days
-
-# Change to real intervals (production):
-TEST_MODE = False  # Disable test mode
-# Then: 30 days = 30 days (real time)
-```
-
-### Change Aggregation Frequency
-
-**Tracker** (`monitoring_ebpf_tracker.py`):
-```python
-# Line 17
-AGGREGATE_INTERVAL = 60  # Change to 120 for 2 minutes, etc.
-```
 
 ### Increase Migration Workers
 
@@ -489,35 +428,8 @@ sudo systemctl daemon-reload
 sudo systemctl restart cephfs-migration-worker
 ```
 
-### Custom Tiering Policies
-
-Edit policy logic in `policy_engine.py`:
-```python
-# Example: More aggressive cold storage
-COLD_THRESHOLD = timedelta(minutes=4)  # Was 6 minutes
-
-# Example: Different promotion logic
-if pool == 'data' and age > WARM_THRESHOLD and file_size > 100MB:
-    mark_for_migration(inode, 'warm')
-```
 
 ## Troubleshooting
-
-### Tracker Not Starting
-
-```bash
-# Check eBPF/BCC installation
-python3 -c "from bcc import BPF; print('BCC OK')"
-
-# Check kernel BTF support
-ls /sys/kernel/btf/vmlinux
-
-# Check if CephFS functions exist
-sudo bpftrace -l 'kprobe:ceph_read_iter'
-
-# View detailed errors
-sudo journalctl -u cephfs-tracker -n 50
-```
 
 ### Files Not Being Tracked
 
@@ -553,52 +465,7 @@ sudo journalctl -u cephfs-migration-worker | grep ERROR
 # - CephFS mount not at /tiercephfs
 ```
 
-### Database Growing Too Large
-
-```bash
-# Check table sizes
-sudo -u postgres psql tiering -c "
-    SELECT 
-        schemaname, tablename,
-        pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) AS size
-    FROM pg_tables 
-    WHERE schemaname = 'public' 
-    ORDER BY pg_total_relation_size(schemaname||'.'||tablename) DESC;
-"
-
-# If file_access_log is large (aggregation not running):
-sudo systemctl status cephfs-tracker
-sudo -u postgres psql tiering -c "SELECT COUNT(*) FROM file_access_log;"
-
-# Manual aggregation
-sudo -u postgres psql tiering -c "SELECT * FROM aggregate_access_log();"
-
-# Vacuum database
-sudo -u postgres psql tiering -c "VACUUM ANALYZE;"
-```
-
-### Subdirectory Files Not Migrating
-
-```bash
-# This should be fixed in current version!
-# If issues persist, check:
-
-# 1. Path in database should include subdirectory
-sudo -u postgres psql tiering -c \
-  "SELECT inode, path FROM file_metadata WHERE path LIKE '%/%';"
-
-# Should show: key/tea.txt, not just: tea.txt
-
-# 2. Tracker using find for path resolution
-sudo journalctl -u cephfs-tracker | grep find
-```
-
 ## Architecture Decisions
-
-### Why Python + BCC Instead of C++ + libbpf?
-- **Rapid development**: Python easier to modify and test
-- **BCC handles BTF**: Automatic CO-RE (Compile Once, Run Everywhere)
-- **Performance sufficient**: <1000 events/sec per client node
 
 ### Why Hot/Cold Tables Instead of RocksDB?
 - **Simpler stack**: One less dependency
@@ -633,87 +500,3 @@ sudo systemctl start cephfs-tracker
 # Edit postgresql.conf: listen_addresses = '*'
 # Edit pg_hba.conf: Allow client IPs
 ```
-
-### Monitoring
-```bash
-# Add monitoring checks
-watch -n 10 "sudo -u postgres psql tiering -c \
-  'SELECT needs_migration, COUNT(*) FROM file_metadata GROUP BY needs_migration'"
-
-# Prometheus exporter (create custom script)
-curl http://localhost:9090/metrics
-# tiering_files_pending_migration{pool="warm"} 5
-# tiering_files_tracked_total 1000
-```
-
-### Backup Strategy
-```bash
-# Backup PostgreSQL daily
-sudo -u postgres pg_dump tiering > tiering_backup_$(date +%Y%m%d).sql
-
-# Restore if needed
-sudo -u postgres psql tiering < tiering_backup_20260112.sql
-```
-
-## Performance Tuning
-
-### For High File Count (1M+ files)
-```python
-# Increase aggregation workers
-AGGREGATE_INTERVAL = 30  # More frequent, smaller batches
-
-# Partition file_metadata table
-CREATE TABLE file_metadata_partition_0 PARTITION OF file_metadata 
-  FOR VALUES FROM (0) TO (1000000000000);
-```
-
-### For High Access Rate
-```python
-# Increase eBPF deduplication window
-# In monitoring_ebpf_tracker.py, eBPF code:
-if (last && (now - *last) < 5000000000ULL) {  # 5 seconds instead of 1
-```
-
-### For Faster Migrations
-```bash
-# Increase workers
---workers 20
-
-# Or use multiple migration worker instances
-# Each with different worker counts
-```
-
-## System Requirements
-
-- **OS**: Ubuntu 24.04 (kernel 6.8+ with BTF)
-- **RAM**: 2GB minimum, 4GB recommended
-- **Storage**: 10GB for PostgreSQL (scales with file count)
-- **CephFS**: Reef 19.2.3+ with multiple data pools
-- **Python**: 3.10+
-- **PostgreSQL**: 14+
-
-## License
-
-MIT License - See LICENSE file
-
-## Contributing
-
-Contributions welcome! Please test with:
-```bash
-# Create test file in subdirectory
-sudo -u testuser mkdir -p /tiercephfs/test/nested/deep
-sudo -u testuser echo "test" > /tiercephfs/test/nested/deep/file.txt
-
-# Verify full path tracked
-sleep 60
-sudo -u postgres psql tiering -c \
-  "SELECT * FROM file_metadata WHERE path LIKE '%deep/file%';"
-```
-
-## Support
-
-For issues:
-1. Check logs: `sudo journalctl -u cephfs-* -n 100`
-2. Verify database: `sudo -u postgres psql tiering`
-3. Test manually: Create file, wait, check migration
-4. Open GitHub issue with logs

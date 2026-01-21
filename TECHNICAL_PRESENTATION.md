@@ -1,19 +1,90 @@
-# CephFS Frequency-Based Tiering System
+# CephFS Dual-Mode Tiering System
 ## Technical Documentation for Engineering Review
 
 ---
 
 ## 📋 Table of Contents
-1. [System Architecture](#system-architecture)
+1. [System Overview & Dual-Mode Architecture](#system-architecture)
 2. [Component Deep Dive](#component-deep-dive)
-3. [SQL Functions](#sql-functions)
+3. [SQL Functions - Both Modes](#sql-functions)
 4. [Service Configuration](#service-configuration)
 5. [Useful Commands](#useful-commands)
 6. [Common Questions & Answers](#common-questions--answers)
 
 ---
 
-## 1. System Architecture
+## 1. System Overview & Dual-Mode Architecture
+
+### Two Tiering Policy Modes
+
+This system implements **two distinct tiering philosophies** that can be switched dynamically:
+
+#### **Mode 1: Access Frequency-Based (Score-Based)**
+```
+Algorithm: score = 0.90 × access_freq
+Function: apply_tiering_policies()
+
+Promotion Rules:
+  - warm → data: score ≥ 9 (≈10+ accesses)
+  - cold → data: score > 0 (any access)
+
+Demotion Rules:
+  - data → warm: score < 9
+  - warm → cold: score < 4.5
+```
+
+**Philosophy**: Hot data stays hot based on cumulative usage patterns. Files that are frequently accessed remain in fast storage regardless of when they were last accessed.
+
+**Use Case**: Workloads where popular files should stay performant (e.g., shared datasets, frequently-read documentation).
+
+#### **Mode 2: Last Access Time-Based (Age-Based)**
+```
+Algorithm: Time thresholds on last_access timestamp
+Function: mark_files_for_migration()
+
+Promotion Rules (bidirectional):
+  - cold → data: accessed in last 3 minutes
+  - warm → data: accessed in last 3 minutes
+
+Demotion Rules:
+  - data → warm: idle for 3 minutes
+  - warm → cold: idle for 6 minutes total
+```
+
+**Philosophy**: Recent activity determines tier placement. Old files automatically archive to cold storage.
+
+**Use Case**: Workloads where file age indicates value (e.g., time-series data, log files, backups).
+
+### Switching Between Modes
+
+```bash
+# Check current mode
+switch_tiering status
+
+# Enable frequency-based mode
+switch_tiering frequency
+
+# Enable time-based mode
+switch_tiering time
+
+# Disable all tiering
+switch_tiering off
+```
+
+**How Switching Works**:
+1. Script edits `policy_engine_optimized.py` to call different PostgreSQL function
+2. Service restarts: `sudo systemctl restart cephfs-policy-engine.service`
+3. All other components (eBPF tracker, aggregator, migration worker) remain unchanged
+
+### Shared Infrastructure
+
+Both modes use identical:
+- **eBPF Tracker**: Monitors file accesses, updates both `access_freq` and `last_access`
+- **Aggregator**: Processes `file_access_log` into `file_metadata` every 60s
+- **Migration Worker**: Executes pool migrations using libcephfs
+- **Database Schema**: Same tables, both columns populated
+
+Only the **policy engine logic** changes between modes.
 
 ### High-Level Flow
 ```
@@ -37,17 +108,22 @@ CephFS Pool Migration (NVMe ↔ SSD ↔ HDD)
 ```
 
 ### Storage Tiers
-| Tier | Pool Name | Storage Type | Use Case |
-|------|-----------|--------------|----------|
-| **DATA (Hot)** | cephfs.tiercephfs.data | NVMe SSD | Frequently accessed (score ≥ 9) |
-| **WARM** | cephfs.tiercephfs.warm | SATA SSD | Moderately accessed (4.5 ≤ score < 9) |
-| **COLD** | cephfs.tiercephfs.cold | HDD | Rarely accessed (score < 4.5) |
+| Tier | Pool Name | Storage Type | Frequency Mode | Time Mode |
+|------|-----------|--------------|----------------|-----------|
+| **DATA (Hot)** | cephfs.tiercephfs.data | NVMe SSD | score ≥ 9 | accessed in last 3 min |
+| **WARM** | cephfs.tiercephfs.warm | SATA SSD | 4.5 ≤ score < 9 | idle 3-6 minutes |
+| **COLD** | cephfs.tiercephfs.cold | HDD | score < 4.5 | idle 6+ minutes |
 
-### Scoring System
+### Frequency Mode Scoring System
 - **Formula**: `score = 0.90 × access_freq`
 - **Read Inflation Fix**: `access_freq = GREATEST(1, COUNT(*) / 2)`
   - CephFS reads trigger 2 kernel events, so we divide by 2
 - **Threshold**: 10 accesses = score 9.0 (promotion threshold)
+
+### Time Mode Thresholds
+- **Promotion (to hot)**: Any access within last 3 minutes
+- **Demotion to warm**: No access for 3 minutes from DATA pool
+- **Demotion to cold**: No access for 6 minutes total from WARM pool
 
 ---
 
@@ -306,9 +382,13 @@ $$ LANGUAGE plpgsql;
 
 ---
 
-### 3.2 `apply_tiering_policies()` - Migration Decision Logic
+### 3.2 Policy Functions - Dual Mode
 
-**Purpose**: Mark files for migration based on scores
+The system supports two PostgreSQL functions for policy evaluation:
+
+#### **Mode 1: `apply_tiering_policies()` - Frequency-Based**
+
+**Purpose**: Mark files for migration based on access frequency scores
 
 **Returns**: TABLE (migration counts)
 
@@ -319,13 +399,15 @@ RETURNS TABLE(
     to_warm_from_data BIGINT,
     to_cold_from_warm BIGINT,
     to_data_from_warm BIGINT,
-    to_data_from_cold BIGINT
+    to_data_from_cold BIGINT,
+    stayed_in_warm BIGINT
 ) AS $$
 DECLARE
     warm_from_data BIGINT := 0;
     cold_from_warm BIGINT := 0;
     data_from_warm BIGINT := 0;
     data_from_cold BIGINT := 0;
+    stayed_warm BIGINT := 0;
 BEGIN
     -- Rule 1: DATA → WARM (score < 9, demotion)
     WITH updated AS (
@@ -335,7 +417,7 @@ BEGIN
         WHERE current_pool = 'cephfs.tiercephfs.data'
           AND score < 9
           AND needs_migration = FALSE
-          AND last_evaluation_time IS NOT NULL  -- Only migrate evaluated files
+          AND last_evaluation_time IS NOT NULL
         RETURNING 1
     )
     SELECT COUNT(*) INTO warm_from_data FROM updated;
@@ -372,6 +454,124 @@ BEGIN
         SET target_pool = 'cephfs.tiercephfs.data',
             needs_migration = TRUE
         WHERE current_pool = 'cephfs.tiercephfs.cold'
+          AND score > 0
+          AND needs_migration = FALSE
+          AND last_evaluation_time IS NOT NULL
+        RETURNING 1
+    )
+    SELECT COUNT(*) INTO data_from_cold FROM updated;
+
+    -- Count files staying in warm (for metrics)
+    SELECT COUNT(*) INTO stayed_warm
+    FROM file_metadata
+    WHERE current_pool = 'cephfs.tiercephfs.warm'
+      AND needs_migration = FALSE;
+
+    RETURN QUERY SELECT warm_from_data, cold_from_warm, data_from_warm, data_from_cold, stayed_warm;
+END;
+$$ LANGUAGE plpgsql;
+```
+
+**Key Logic**:
+- **Promotion threshold**: score ≥ 9 (approximately 10+ accesses)
+- **Demotion thresholds**: score < 9 (DATA→WARM), score < 4.5 (WARM→COLD)
+- **COLD recovery**: Any access (score > 0) promotes directly to DATA (skips WARM for faster recovery)
+- **Safety check**: Only migrate files with `last_evaluation_time IS NOT NULL`
+
+#### **Mode 2: `mark_files_for_migration()` - Time-Based**
+
+**Purpose**: Mark files for migration based on last access timestamp
+
+**Returns**: TABLE (migration counts)
+
+**Code**:
+```sql
+CREATE OR REPLACE FUNCTION mark_files_for_migration()
+RETURNS TABLE(
+    data_to_warm_count BIGINT,
+    warm_to_cold_count BIGINT,
+    warm_to_data_count BIGINT,
+    cold_to_warm_count BIGINT,
+    stayed_in_warm_count BIGINT
+) AS $$
+DECLARE
+    v_data_to_warm BIGINT := 0;
+    v_warm_to_cold BIGINT := 0;
+    v_warm_to_data BIGINT := 0;
+    v_cold_to_warm BIGINT := 0;
+    v_stayed_in_warm BIGINT := 0;
+BEGIN
+    -- PROMOTIONS (accessed files move to hotter pools)
+    -- cold → data (accessed in last 3 minutes)
+    WITH updated AS (
+        UPDATE file_metadata
+        SET needs_migration = TRUE,
+            target_pool = 'cephfs.tiercephfs.data'
+        WHERE current_pool = 'cephfs.tiercephfs.cold'
+          AND needs_migration = FALSE
+          AND last_access >= NOW() - INTERVAL '3 minutes'
+        RETURNING 1
+    )
+    SELECT COUNT(*) INTO v_cold_to_warm FROM updated;
+    
+    -- warm → data (accessed in last 3 minutes)
+    WITH updated AS (
+        UPDATE file_metadata
+        SET needs_migration = TRUE,
+            target_pool = 'cephfs.tiercephfs.data'
+        WHERE current_pool = 'cephfs.tiercephfs.warm'
+          AND needs_migration = FALSE
+          AND last_access >= NOW() - INTERVAL '3 minutes'
+        RETURNING 1
+    )
+    SELECT COUNT(*) INTO v_warm_to_data FROM updated;
+    
+    -- DEMOTIONS (old files move to colder pools)
+    -- data → warm (not accessed for 3 minutes)
+    WITH updated AS (
+        UPDATE file_metadata
+        SET needs_migration = TRUE,
+            target_pool = 'cephfs.tiercephfs.warm'
+        WHERE current_pool = 'cephfs.tiercephfs.data'
+          AND needs_migration = FALSE
+          AND last_access < NOW() - INTERVAL '3 minutes'
+        RETURNING 1
+    )
+    SELECT COUNT(*) INTO v_data_to_warm FROM updated;
+    
+    -- warm → cold (not accessed for 6 minutes total)
+    WITH updated AS (
+        UPDATE file_metadata
+        SET needs_migration = TRUE,
+            target_pool = 'cephfs.tiercephfs.cold'
+        WHERE current_pool = 'cephfs.tiercephfs.warm'
+          AND needs_migration = FALSE
+          AND last_access < NOW() - INTERVAL '6 minutes'
+        RETURNING 1
+    )
+    SELECT COUNT(*) INTO v_warm_to_cold FROM updated;
+    
+    -- Count files staying in warm (for metrics)
+    SELECT COUNT(*) INTO v_stayed_in_warm
+    FROM file_metadata
+    WHERE current_pool = 'cephfs.tiercephfs.warm'
+      AND needs_migration = FALSE;
+    
+    RETURN QUERY SELECT v_data_to_warm, v_warm_to_cold, v_warm_to_data, v_cold_to_warm, v_stayed_in_warm;
+END;
+$$ LANGUAGE plpgsql;
+```
+
+**Key Logic**:
+- **Bidirectional tiering**: Promotion rules run before demotion rules
+- **Promotion**: Any file accessed in last 3 minutes goes directly to DATA (hot)
+- **Demotion**: Progressive cooldown (3 min → warm, 6 min → cold)
+- **Immediate response**: No evaluation delays, acts on every access
+- **Return signature**: Matches `apply_tiering_policies()` for compatibility with policy engine
+
+---
+
+### 3.3 `reset_file_after_migration()` - Post-Migration Cleanup
           AND score > 0
           AND needs_migration = FALSE
           AND last_evaluation_time IS NOT NULL
@@ -512,7 +712,23 @@ WantedBy=multi-user.target
 
 ## 5. Useful Commands
 
-### 5.1 Service Management
+### 5.1 Tiering Mode Management
+
+```bash
+# Check current tiering mode
+switch_tiering status
+
+# Switch to frequency-based mode (score = 0.90 × access_freq)
+switch_tiering frequency
+
+# Switch to time-based mode (last_access timestamps)
+switch_tiering time
+
+# Disable all tiering services
+switch_tiering off
+```
+
+### 5.2 Service Management
 
 ```bash
 # Check all tiering services
@@ -533,12 +749,17 @@ sudo systemctl restart cephfs-migration-worker.service
 
 ---
 
-### 5.2 Database Queries
+### 5.3 Database Queries
 
 ```sql
--- View all tracked files
-SELECT path, SUBSTRING(current_pool, 20) as pool, access_freq, score 
-FROM file_metadata ORDER BY score DESC;
+-- View all tracked files (works for both modes)
+SELECT path, 
+       SUBSTRING(current_pool, 20) as pool, 
+       access_freq,   -- Used in frequency mode
+       score,         -- Calculated in frequency mode
+       last_access    -- Used in time mode
+FROM file_metadata 
+ORDER BY last_access DESC;
 
 -- Files pending migration
 SELECT path, SUBSTRING(current_pool, 20) as current, 
@@ -641,7 +862,24 @@ systemctl status cephfs-tracker.service | grep "CPU:"
 
 ## 6. Common Questions & Answers
 
-### Q1: Why use eBPF instead of FUSE or client-side tracking?
+### Q1: Why have two tiering modes instead of just one?
+
+**Answer**:
+Different workloads have different characteristics:
+- **Frequency Mode**: Best for shared datasets where popular files should stay fast (e.g., ML models, shared code repositories)
+- **Time Mode**: Best for time-series data where recent = important (e.g., logs, backups, monitoring data)
+- **Flexibility**: Organizations can test both and choose what works best
+
+### Q2: Can I switch between modes without losing data?
+
+**Answer**:
+Yes, switching is safe because:
+- Both modes track the same data (`access_freq` and `last_access`)
+- No database schema changes required
+- Files remain in their current pools during the switch
+- Only the policy decision logic changes
+
+### Q3: Why use eBPF instead of FUSE or client-side tracking?
 
 **Answer**: 
 - **Performance**: eBPF runs in kernel space, zero overhead
@@ -649,14 +887,14 @@ systemctl status cephfs-tracker.service | grep "CPU:"
 - **Accuracy**: Captures all access patterns (even from kernel clients)
 - **Security**: Cannot be bypassed by users
 
-### Q2: Why separate hot table (file_access_log) and cold table (file_metadata)?
+### Q4: Why separate hot table (file_access_log) and cold table (file_metadata)?
 
 **Answer**:
 - **Write Performance**: Hot table is append-only, no locks, fast inserts
 - **Read Performance**: Cold table is indexed, optimized for queries
 - **Batch Processing**: Aggregation reduces write amplification
 
-### Q3: Why does the inode change during migration?
+### Q5: Why does the inode change during migration?
 
 **Answer**:
 - CephFS doesn't support in-place pool changes
@@ -664,21 +902,21 @@ systemctl status cephfs-tracker.service | grep "CPU:"
 - The rename operation assigns a new inode
 - Solution: Update `file_metadata` with new inode after migration
 
-### Q4: Why immediate evaluation for WARM/COLD but 3-minute rule for DATA?
+### Q6: In frequency mode, why immediate evaluation for WARM/COLD but 3-minute rule for DATA?
 
 **Answer**:
 - **DATA Files**: Most active, need stability (avoid thrashing)
 - **WARM Files**: Accessed files should promote quickly (better user experience)
 - **COLD Files**: Any access is significant, promote immediately
 
-### Q5: Why does COLD → DATA skip WARM?
+### Q7: In time mode, why does COLD → DATA skip WARM?
 
 **Answer**:
 - User accessed a cold file = likely needs it urgently
 - Going through WARM adds unnecessary delay (extra migration)
 - Direct promotion improves latency for cold data recovery
 
-### Q6: How do you handle migration failures?
+### Q8: How do you handle migration failures?
 
 **Answer**:
 ```python
@@ -691,7 +929,7 @@ except Exception as e:
     logger.error(f"Migration failed: {e}")
 ```
 
-### Q7: What happens if a file is accessed during migration?
+### Q9: What happens if a file is accessed during migration?
 
 **Answer**:
 - Migration uses temp files (`.__ tiering__`)
@@ -699,27 +937,53 @@ except Exception as e:
 - Atomic rename at the end ensures no disruption
 - Worst case: User reads from old pool (still works)
 
-### Q8: How do you prevent migration loops (file bouncing between pools)?
+### Q10: How do you prevent migration loops (file bouncing between pools)?
 
 **Answer**:
+
+**Frequency Mode**:
 - **Score resets to 0** after migration
 - **3-minute evaluation window** for DATA pool prevents immediate demotion
 - **Evaluation schedule preserved** (creation_time, last_evaluation_time)
 
-### Q9: Why score = 0.90 × access_freq (why 0.90)?
+**Time Mode**:
+- **3-minute promotion window** prevents immediate demotion after promotion
+- **6-minute cold threshold** creates hysteresis
+- **Timestamp-based decisions** are deterministic
+
+### Q11: Why score = 0.90 × access_freq (why 0.90)?
 
 **Answer**:
 - Allows fine-grained scoring
 - 10 accesses = 9.0 (exactly at threshold)
 - Can be tuned for different workloads
+- Leaves room for future weighting factors
 
-### Q10: How do you scale this to millions of files?
+### Q12: How do you scale this to millions of files?
 
 **Answer**:
 - **Batch operations**: Aggregate 1000 events at a time
 - **Indexed queries**: All query predicates are indexed
 - **Horizontal scaling**: Can partition by inode range
 - **Hot table pruning**: Delete old log entries regularly
+
+### Q13: Which mode should I use for my workload?
+
+**Answer**:
+
+**Use Frequency Mode if**:
+- Files have varying importance based on usage
+- Popular files should stay fast regardless of age
+- You have shared datasets accessed by multiple users
+- Access patterns are bursty but predictable
+
+**Use Time Mode if**:
+- Recent data is more valuable than old data
+- Files naturally age out of relevance
+- You have time-series or log-like workloads
+- You want simpler, more predictable behavior
+
+**Test both**: The switch is instant, so try both on your workload!
 
 ---
 

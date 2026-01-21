@@ -9,6 +9,21 @@
 
 **Purpose**: Automatically migrate files between three storage tiers (SSD, Hybrid, HDD) based on access patterns, optimizing storage costs while maintaining performance for frequently accessed files.
 
+**Dual-Mode Tiering**:
+This system supports two distinct policy modes:
+
+1. **Access Frequency-Based**: Score calculation (`score = 0.90 × access_freq`)
+   - Files tier based on cumulative access patterns
+   - Promotion threshold: score ≥ 9
+   - Demotion threshold: score < 4.5
+
+2. **Last Access Time-Based**: Timestamp-based thresholds
+   - Files tier based on time since last access
+   - Promotion: accessed in last 3 minutes → hot
+   - Demotion: idle 3 min → warm, idle 6 min → cold
+
+Both modes share the same monitoring, aggregation, and migration infrastructure.
+
 **Technology Stack**:
 - **Access Tracking**: eBPF (kernel-level hooks) + BCC (BPF Compiler Collection)
 - **Database**: PostgreSQL with hot/cold table architecture
@@ -35,9 +50,10 @@
 │         ↓ ↑                                                         │
 │  ┌─────────────────────────────────────────┐                       │
 │  │   CephFS Mount Point (/tiercephfs)      │                       │
-│  │   - data/ (SSD - Fast)                  │                       │
-│  │   - warm/ (Hybrid - Medium)             │                       │
-│  │   - cold/ (HDD - Slow)                  │                       │
+│  │   Files assigned to pools:              │                       │
+│  │   • cephfs.tiercephfs.data (SSD)        │                       │
+│  │   • cephfs.tiercephfs.warm (Hybrid)     │                       │
+│  │   • cephfs.tiercephfs.cold (HDD)        │                       │
 │  └─────────────────────────────────────────┘                       │
 │         ↓ ↑                                                         │
 └─────────┼─┼─────────────────────────────────────────────────────────┘
@@ -117,21 +133,30 @@
 │  ┌───────────────────────────────────────────────────────────────┐ │
 │  │  Policy Engine (policy_engine.py)                             │ │
 │  │  • Runs every 60 seconds                                      │ │
-│  │  • Calls: apply_tiering_policies()                            │ │
-│  │  • Test Mode: 3 minutes = 30 days                            │ │
+│  │  • Calls: apply_tiering_policies() OR mark_files_for_migration() │ │
+│  │  • Mode switchable via switch_tiering command                 │ │
 │  │                                                               │ │
-│  │  Policies:                                                    │ │
+│  │  Policies - Dual Mode:                                        │ │
 │  │  ┌──────────────────────────────────────────────────────┐    │ │
-│  │  │ 1. DEMOTION (High Priority)                         │    │ │
-│  │  │    warm/cold → data                                  │    │ │
-│  │  │    IF: score ≥ 0.7 (high frequency)                 │    │ │
+│  │  │ MODE 1: Frequency-Based (apply_tiering_policies)   │    │ │
 │  │  │                                                      │    │ │
-│  │  │ 2. PROMOTION (Idle files move to slower storage)    │    │ │
-│  │  │    data → warm                                       │    │ │
-│  │  │    IF: last_access < NOW() - 3 minutes              │    │ │
+│  │  │ PROMOTION (to faster storage):                      │    │ │
+│  │  │   warm/cold → data                                   │    │ │
+│  │  │   IF: score ≥ 9 (high frequency)                    │    │ │
 │  │  │                                                      │    │ │
-│  │  │    warm → cold                                       │    │ │
-│  │  │    IF: last_access < NOW() - 6 minutes              │    │ │
+│  │  │ DEMOTION (to slower storage):                       │    │ │
+│  │  │   data → warm: score < 9                            │    │ │
+│  │  │   warm → cold: score < 4.5                          │    │ │
+│  │  │                                                      │    │ │
+│  │  │ MODE 2: Time-Based (mark_files_for_migration)      │    │ │
+│  │  │                                                      │    │ │
+│  │  │ PROMOTION (to faster storage):                      │    │ │
+│  │  │   cold/warm → data                                   │    │ │
+│  │  │   IF: accessed in last 3 minutes                    │    │ │
+│  │  │                                                      │    │ │
+│  │  │ DEMOTION (to slower storage):                       │    │ │
+│  │  │   data → warm: idle 3+ minutes                      │    │ │
+│  │  │   warm → cold: idle 6+ minutes                      │    │ │
 │  │  └──────────────────────────────────────────────────────┘    │ │
 │  │                                                               │ │
 │  │  Result: Sets needs_migration = TRUE, target_pool             │ │

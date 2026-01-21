@@ -1,4 +1,29 @@
-# CephFS Tiering System - Quick Reference
+# CephFS Dual-Mode Tiering System - Quick Reference
+
+## 🎯 Tiering Mode Management
+
+### Switch Between Modes
+```bash
+# Check current mode
+switch_tiering status
+
+# Enable frequency-based mode (score = 0.90 × access_freq)
+switch_tiering frequency
+
+# Enable time-based mode (last_access timestamps)
+switch_tiering time
+
+# Disable all tiering
+switch_tiering off
+```
+
+### Mode Comparison
+| Mode | Decision Logic | Best For |
+|------|----------------|----------|
+| **Frequency** | `score = 0.90 × access_freq` | Popular files stay hot, shared datasets |
+| **Time** | `last_access < NOW() - INTERVAL` | Recent data matters, time-series workloads |
+
+---
 
 ## 🚀 Most Useful Commands
 
@@ -12,7 +37,8 @@ sudo systemctl status cephfs-{tracker,policy-engine,migration-worker}.service --
 sudo -u postgres psql tiering -c "
 SELECT SUBSTRING(current_pool, 20) as pool, 
        COUNT(*) as files,
-       ROUND(AVG(score), 2) as avg_score
+       ROUND(AVG(score), 2) as avg_score,
+       MAX(last_access) as most_recent
 FROM file_metadata 
 GROUP BY current_pool 
 ORDER BY avg_score DESC;"
@@ -20,7 +46,7 @@ ORDER BY avg_score DESC;"
 
 ### Watch Live Migrations
 ```bash
-watch -n 5 "sudo -u postgres psql tiering -c \"SELECT path, SUBSTRING(current_pool, 20) as pool, score FROM file_metadata WHERE needs_migration = TRUE;\""
+watch -n 5 "sudo -u postgres psql tiering -c \"SELECT path, SUBSTRING(current_pool, 20) as pool, score, last_access FROM file_metadata WHERE needs_migration = TRUE;\""
 ```
 
 ### Test End-to-End Flow
@@ -31,33 +57,52 @@ echo "test" > /tiercephfs/test.txt && cat /tiercephfs/test.txt
 # 2. Force aggregation
 sudo -u postgres psql tiering -c "SELECT aggregate_access_log();"
 
-# 3. Check tracking
-sudo -u postgres psql tiering -c "SELECT * FROM file_metadata WHERE path = 'test.txt';"
+# 3. Check tracking (works for both modes)
+sudo -u postgres psql tiering -c "SELECT path, access_freq, score, last_access FROM file_metadata WHERE path = 'test.txt';"
 ```
 
 ---
 
-## 📊 Key Formulas
+## 📊 Key Formulas & Thresholds
 
+### Frequency Mode
 ```
 Score = 0.90 × access_freq
 access_freq = GREATEST(1, COUNT(*) / 2)  # Fix 2x read inflation
 
 Thresholds:
-  score ≥ 9:   HOT (DATA pool)
+  score ≥ 9:   HOT (DATA pool) ← ~10+ accesses
   4.5 ≤ score < 9: WARM
   score < 4.5: COLD
+```
+
+### Time Mode
+```
+Promotion (to hot):
+  last_access >= NOW() - INTERVAL '3 minutes'
+
+Demotion:
+  DATA → WARM: last_access < NOW() - INTERVAL '3 minutes'
+  WARM → COLD: last_access < NOW() - INTERVAL '6 minutes'
 ```
 
 ---
 
 ## ⏱️ Timing Rules
 
+### Frequency Mode (Evaluation Windows)
 | Pool | Accessed | Not Accessed |
 |------|----------|--------------|
 | DATA | 3-min wait | 3-min wait |
 | WARM | Immediate | 3-min wait |
 | COLD | Immediate | No demotion |
+
+### Time Mode (Access Thresholds)
+| Pool | Recently Accessed (<3 min) | Idle (>3 min) | Idle (>6 min) |
+|------|----------------------------|---------------|---------------|
+| DATA | Stay | → WARM | → WARM |
+| WARM | → DATA | Stay | → COLD |
+| COLD | → DATA | Stay | Stay |
 
 ---
 
