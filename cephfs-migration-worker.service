@@ -1,6 +1,5 @@
 [Unit]
 Description=CephFS Tiering Migration Worker
-Documentation=file:///home/cephvm/tiering_system/FINAL_DOCUMENTATION.md
 After=network.target postgresql.service cephfs-policy-engine.service
 Requires=postgresql.service
 Wants=cephfs-policy-engine.service

@@ -111,13 +111,11 @@ CREATE INDEX IF NOT EXISTS idx_pool_score ON file_metadata(current_pool, score);
 VACUUM ANALYZE file_metadata;
 VACUUM ANALYZE file_access_log;
 
--- Clean old hot table entries (older than 1 hour)
-DELETE FROM file_access_log WHERE access_time < NOW() - INTERVAL '1 hour';
 ```
 
 ---
 
-## 🎯 Demo Commands for Engineers
+## 🎯 Demo Commands
 
 ```bash
 # 1. Show architecture

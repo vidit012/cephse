@@ -1,6 +1,5 @@
 [Unit]
 Description=CephFS Tiering Policy Engine
-Documentation=file:///home/cephvm/tiering_system/FINAL_DOCUMENTATION.md
 After=network.target postgresql.service cephfs-tracker.service
 Requires=postgresql.service
 Wants=cephfs-tracker.service
@@ -10,7 +9,7 @@ Type=simple
 User=root
 Group=root
 WorkingDirectory=/home/cephvm/tiering_system
-ExecStart=/usr/bin/python3 /home/cephvm/tiering_system/src/policy_engine_test.py --interval 60
+ExecStart=/usr/bin/python3 /home/cephvm/tiering_system/src/policy_engine_optimized.py --interval 60
 StandardOutput=journal
 StandardError=journal
 Restart=always

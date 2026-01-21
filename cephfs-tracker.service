@@ -1,6 +1,5 @@
 [Unit]
 Description=CephFS File Access Tracker (eBPF)
-Documentation=file:///home/cephvm/tiering_system/FINAL_DOCUMENTATION.md
 After=network.target postgresql.service ceph.target
 Requires=postgresql.service
 
