@@ -15,7 +15,7 @@
 ## 📋 Table of Contents
 - [Description](#-description)
 - [Key Features](#-key-features)
-- [Architecture](#-architecture)
+- [Architecture](#️-architecture)
 - [Technology Stack](#-technology-stack)
 - [Prerequisites](#-prerequisites)
 - [Installation](#-installation)
@@ -362,7 +362,7 @@ sudo journalctl -u cephfs-migration-worker -f
 ---
 
 
-## 👥 Dvelopement
+## 👥 Development
 
 - Document version: 1.0.0
 - Release Date : Jan 2026
