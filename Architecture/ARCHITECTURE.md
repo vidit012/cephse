@@ -1,4 +1,4 @@
-# CephFS Client-Side Storage Tiering System - Architecture
+# CephFS Storage Tiering System - Architecture
 
 > **Production-Grade Automated Storage Tiering for CephFS**  
 > eBPF-based Access Tracking + PostgreSQL Analytics + Automated Pool Migration
@@ -29,7 +29,7 @@ Both modes share the same monitoring, aggregation, and migration infrastructure.
 - **Database**: PostgreSQL with hot/cold table architecture
 - **Migration**: libcephfs C library with shadow file technique
 - **Orchestration**: Python 3 + systemd services
-- **Target Platform**: CephFS client-side (works at mount point level)
+- **Target Platform**: CephFS (works at mount point level)
 
 **Key Metrics**:
 - Zero data loss during aggregation (watermark-based)
@@ -58,39 +58,39 @@ Both modes share the same monitoring, aggregation, and migration infrastructure.
 │         ↓ ↑                                                         │
 └─────────┼─┼─────────────────────────────────────────────────────────┘
           ↓ ↑
-┌─────────┼─┼─────────────────────────────────────────────────────────┐
-│         ↓ ↑           KERNEL SPACE                                  │
+┌─────────┼─┼────────────────────────────────────────────────────────┐
+│         ↓ ↑           KERNEL SPACE                                 │
 │  ┌─────────────────────────────────────────┐                       │
 │  │  CephFS Kernel Module Functions:        │                       │
 │  │  • ceph_read_iter()  ← eBPF hook        │                       │
 │  │  • ceph_write_iter() ← eBPF hook        │                       │
 │  └──────────────┬──────────────────────────┘                       │
-│                 ↓                                                   │
+│                 ↓                                                  │
 │  ┌──────────────────────────────────────────────────────────────┐  │
 │  │              eBPF Program (BCC)                              │  │
 │  │  • Captures: inode, uid, filename, timestamp                 │  │
 │  │  • Filters: Skip root (UID 0), Skip hidden files (.)         │  │
-│  │  • Deduplicates: 1-second window per inode                   │  │
+│  │                                                              │  │
 │  └──────────────┬───────────────────────────────────────────────┘  │
-│                 ↓ perf buffer                                       │
-└─────────────────┼───────────────────────────────────────────────────┘
+│                 ↓ perf buffer                                      │
+└─────────────────┼──────────────────────────────────────────────────┘
                   ↓
-┌─────────────────────────────────────────────────────────────────────┐
-│                    MONITORING LAYER                                 │
+┌────────────────────────────────────────────────────────────────────┐
+│                    MONITORING LAYER                                │
 │  ┌───────────────────────────────────────────────────────────────┐ │
 │  │  Access Tracker (monitoring_ebpf_tracker.py)                  │ │
 │  │  • Polls eBPF perf buffer                                     │ │
-│  │  • Resolves full path: find /tiercephfs -inum <inode>        │ │
-│  │  • Batch inserts (1000 events or 1 second)                   │ │
-│  │  • Aggregates every 60 seconds                               │ │
-│  │  Service: cephfs-tracker.service                             │ │
+│  │  • Resolves full path: find /tiercephfs -inum <inode>         │ │
+│  │  • Batch inserts (1000 events or 1 second)                    │ │
+│  │  • Aggregates every 60 seconds                                │ │
+│  │  Service: cephfs-tracker.service                              │ │
 │  └──────────────┬────────────────────────────────────────────────┘ │
-│                 ↓                                                   │
-└─────────────────┼───────────────────────────────────────────────────┘
+│                 ↓                                                  │
+└─────────────────┼──────────────────────────────────────────────────┘
                   ↓
-┌─────────────────────────────────────────────────────────────────────┐
-│                     DATABASE LAYER (PostgreSQL)                     │
-│                                                                     │
+┌────────────────────────────────────────────────────────────────────┐
+│                     DATABASE LAYER (PostgreSQL)                    │
+│                                                                    │
 │  ┌────────────────────────────────────────┐                        │
 │  │  HOT TABLE: file_access_log            │                        │
 │  │  ┌──────────────────────────────────┐  │                        │
@@ -101,7 +101,7 @@ Both modes share the same monitoring, aggregation, and migration infrastructure.
 │  │  │ access_time                      │  │  Cleared after         │
 │  │  └──────────────────────────────────┘  │  aggregation           │
 │  └────────────────────────────────────────┘                        │
-│                 ↓ Aggregation (60s)                                 │
+│                 ↓ Aggregation (60s)                                │
 │  ┌────────────────────────────────────────────────────────────┐    │
 │  │  COLD TABLE: file_metadata                                 │    │
 │  │  ┌──────────────────────────────────────────────────────┐  │    │
@@ -119,17 +119,17 @@ Both modes share the same monitoring, aggregation, and migration infrastructure.
 │  │  • idx_needs_migration (needs_migration, target_pool)      │    │
 │  │  • idx_file_metadata_score (score DESC)                    │    │
 │  └────────────────────────────────────────────────────────────┘    │
-│                 ↓                                                   │
+│                 ↓                                                  │
 │  ┌────────────────────────────────────────────────────────────┐    │
 │  │  Stored Functions:                                         │    │
 │  │  • aggregate_access_log() - Moves data from hot to cold    │    │
 │  │  • calculate_score() - Computes frequency-based score      │    │
 │  │  • apply_tiering_policies() - Marks files for migration    │    │
 │  └────────────────────────────────────────────────────────────┘    │
-└─────────────────┼───────────────────────────────────────────────────┘
-                  ↓
-┌─────────────────────────────────────────────────────────────────────┐
-│                    POLICY ENGINE LAYER                              │
+└─────────────────┼──────────────────────────────────────────────────┘
+                  
+┌────────────────────────────────────────────────────────────────────┐
+│                    POLICY ENGINE LAYER                             │
 │  ┌───────────────────────────────────────────────────────────────┐ │
 │  │  Policy Engine (policy_engine.py)                             │ │
 │  │  • Runs every 60 seconds                                      │ │
@@ -137,35 +137,35 @@ Both modes share the same monitoring, aggregation, and migration infrastructure.
 │  │  • Mode switchable via switch_tiering command                 │ │
 │  │                                                               │ │
 │  │  Policies - Dual Mode:                                        │ │
-│  │  ┌──────────────────────────────────────────────────────┐    │ │
-│  │  │ MODE 1: Frequency-Based (apply_tiering_policies)   │    │ │
-│  │  │                                                      │    │ │
-│  │  │ PROMOTION (to faster storage):                      │    │ │
-│  │  │   warm/cold → data                                   │    │ │
-│  │  │   IF: score ≥ 9 (high frequency)                    │    │ │
-│  │  │                                                      │    │ │
-│  │  │ DEMOTION (to slower storage):                       │    │ │
-│  │  │   data → warm: score < 9                            │    │ │
-│  │  │   warm → cold: score < 4.5                          │    │ │
-│  │  │                                                      │    │ │
-│  │  │ MODE 2: Time-Based (mark_files_for_migration)      │    │ │
-│  │  │                                                      │    │ │
-│  │  │ PROMOTION (to faster storage):                      │    │ │
-│  │  │   cold/warm → data                                   │    │ │
-│  │  │   IF: accessed in last 3 minutes                    │    │ │
-│  │  │                                                      │    │ │
-│  │  │ DEMOTION (to slower storage):                       │    │ │
-│  │  │   data → warm: idle 3+ minutes                      │    │ │
-│  │  │   warm → cold: idle 6+ minutes                      │    │ │
-│  │  └──────────────────────────────────────────────────────┘    │ │
+│  │  ┌──────────────────────────────────────────────────────┐     │ │
+│  │  │ MODE 1: Frequency-Based (apply_tiering_policies)     │     │ │
+│  │  │                                                      │     │ │
+│  │  │ PROMOTION (to faster storage):                       │     │ │
+│  │  │   warm/cold → data                                   │     │ │
+│  │  │   IF: score ≥ 9 (high frequency)                     │     │ │
+│  │  │                                                      │     │ │
+│  │  │ DEMOTION (to slower storage):                        │     │ │
+│  │  │   data → warm: score < 9                             │     │ │
+│  │  │   warm → cold: score < 4.5                           │     │ │
+│  │  │                                                      │     │ │
+│  │  │ MODE 2: Time-Based (mark_files_for_migration)        │     │ │
+│  │  │                                                      │     │ │
+│  │  │ PROMOTION (to faster storage):                       │     │ │
+│  │  │   cold/warm → data                                   │     │ │
+│  │  │   IF: accessed in last 3 minutes                     │     │ │
+│  │  │                                                      │     │ │
+│  │  │ DEMOTION (to slower storage):                        │     │ │
+│  │  │   data → warm: idle 3+ minutes                       │     │ │
+│  │  │   warm → cold: idle 6+ minutes                       │     │ │
+│  │  └──────────────────────────────────────────────────────┘     │ |
 │  │                                                               │ │
 │  │  Result: Sets needs_migration = TRUE, target_pool             │ │
 │  │  Service: cephfs-policy-engine.service                        │ │
 │  └───────────────────────────────────────────────────────────────┘ │
-└─────────────────┼───────────────────────────────────────────────────┘
-                  ↓
-┌─────────────────────────────────────────────────────────────────────┐
-│                   MIGRATION WORKER LAYER                            │
+└─────────────────┼──────────────────────────────────────────────────┘
+                  
+┌────────────────────────────────────────────────────────────────────┐
+│                   MIGRATION WORKER LAYER                           │
 │  ┌───────────────────────────────────────────────────────────────┐ │
 │  │  Migration Worker (migration_worker.py)                       │ │
 │  │  • 5 parallel worker threads                                  │ │
@@ -173,9 +173,9 @@ Both modes share the same monitoring, aggregation, and migration infrastructure.
 │  │  • Uses: SELECT ... FOR UPDATE SKIP LOCKED                    │ │
 │  │                                                               │ │
 │  │  Per-File Process:                                            │ │
-│  │  1. Get old_inode = os.stat(file).st_ino                     │ │
-│  │  2. Call libcephfs_migrate (C binary)                        │ │
-│  │  3. Get new_inode = os.stat(file).st_ino                     │ │
+│  │  1. Get old_inode = os.stat(file).st_ino                      │ │
+│  │  2. Call libcephfs_migrate (C binary)                         │ │
+│  │  3. Get new_inode = os.stat(file).st_ino                      │ │
 │  │  4. If inode changed:                                         │ │
 │  │     - DELETE old_inode from database                          │ │
 │  │     - INSERT new_inode with new pool                          │ │
@@ -183,11 +183,11 @@ Both modes share the same monitoring, aggregation, and migration infrastructure.
 │  │                                                               │ │
 │  │  Service: cephfs-migration-worker.service                     │ │
 │  └──────────────┬────────────────────────────────────────────────┘ │
-│                 ↓                                                   │
-└─────────────────┼───────────────────────────────────────────────────┘
+│                 ↓                                                  │
+└─────────────────┼──────────────────────────────────────────────────┘
                   ↓
-┌─────────────────────────────────────────────────────────────────────┐
-│                PHYSICAL MIGRATION LAYER                             │
+┌────────────────────────────────────────────────────────────────────┐
+│                PHYSICAL MIGRATION LAYER                            │
 │  ┌───────────────────────────────────────────────────────────────┐ │
 │  │  libcephfs_migrate (C Binary)                                 │ │
 │  │  • Uses libcephfs library                                     │ │
@@ -199,7 +199,7 @@ Both modes share the same monitoring, aggregation, and migration infrastructure.
 │  │    5. Atomic rename: shadow → original                        │ │
 │  │  • Returns: new inode number                                  │ │
 │  └───────────────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────────────┘
+└────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -386,7 +386,7 @@ CREATE TABLE file_metadata (
 │  3. Sleep                                   │
 │                                             │
 │  Policy Logic (in PostgreSQL function):     │
-│  • Demotion: score ≥ 0.7 → data            │
+│  • Demotion: score ≥ 0.7 → data             │
 │  • Promotion: age-based                     │
 │  • Returns: (promoted, demoted) counts      │
 └─────────────────────────────────────────────┘
@@ -413,25 +413,25 @@ CREATE TABLE file_metadata (
 │  • Get migration candidates (batch_size=100)            │
 │  • Submit to thread pool                                │
 │                                                         │
-│  ┌───────────────────────────────────────────────────┐ │
-│  │          Thread Pool (5 workers)                  │ │
-│  │                                                   │ │
-│  │  Worker 1:  ┌──────────────────┐                 │ │
-│  │             │ Migrate file A   │                 │ │
-│  │             └──────────────────┘                 │ │
-│  │                                                   │ │
-│  │  Worker 2:  ┌──────────────────┐                 │ │
-│  │             │ Migrate file B   │                 │ │
-│  │             └──────────────────┘                 │ │
-│  │                                                   │ │
-│  │  Worker 3-5: Similar...                          │ │
-│  │                                                   │ │
-│  │  Each worker:                                     │ │
-│  │  1. Own database connection                      │ │
-│  │  2. Call libcephfs_migrate                       │ │
-│  │  3. Track inode changes                          │ │
-│  │  4. Update database                              │ │
-│  └───────────────────────────────────────────────────┘ │
+│  ┌───────────────────────────────────────────────────┐  │
+│  │          Thread Pool (5 workers)                  │  │
+│  │                                                   │  │
+│  │  Worker 1:  ┌──────────────────┐                  │  │
+│  │             │ Migrate file A   │                  │  │
+│  │             └──────────────────┘                  │  │
+│  │                                                   │  │
+│  │  Worker 2:  ┌──────────────────┐                  │  │
+│  │             │ Migrate file B   │                  │  │
+│  │             └──────────────────┘                  │  │
+│  │                                                   │  │
+│  │  Worker 3-5: Similar...                           │  │
+│  │                                                   │  │
+│  │  Each worker:                                     │  │
+│  │  1. Own database connection                       │  │
+│  │  2. Call libcephfs_migrate                        │  │
+│  │  3. Track inode changes                           │  │
+│  │  4. Update database                               │  │
+│  └───────────────────────────────────────────────────┘  │
 │                                                         │
 │  Concurrency Control:                                   │
 │  • FOR UPDATE SKIP LOCKED (row-level locks)             │
