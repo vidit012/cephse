@@ -115,10 +115,6 @@ For comprehensive architecture documentation including component diagrams, data 
 - **[Detailed Architecture](Architecture/detailed.png)** - Component interactions and data flow
 - **[Flowchart](Architecture/flowchart.png)** - Process flow and decision logic
 
-**Documentation**:
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Complete system architecture and design rationale
-- **[TECHNICAL_PRESENTATION.md](TECHNICAL_PRESENTATION.md)** - Technical deep dive with algorithms and SQL functions
-
 ---
 
 ## 🔧 Technology Stack
