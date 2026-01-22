@@ -13,15 +13,18 @@
 ---
 
 ## 📋 Table of Contents
-- [Description](#description)
-- [Key Features](#key-features)
-- [Architecture](#architecture)
-- [Technology Stack](#technology-stack)
-- [System Comparison](#system-comparison)
-- [Prerequisites](#prerequisites)
-- [Installation](#installation)
-- [Usage](#usage)
-- [Documentation](#documentation)
+- [Description](#-description)
+- [Key Features](#-key-features)
+- [Architecture](#-architecture)
+- [Technology Stack](#-technology-stack)
+- [Prerequisites](#-prerequisites)
+- [Installation](#-installation)
+- [Usage](#-usage)
+- [Documentation](#-documentation)
+- [System Comparison](#-system-comparison)
+- [Mode Selection Guide](#-mode-selection-guide)
+- [Development](#-development)
+- [Architecture Decisions](#architecture-decisions)
 
 ---
 
@@ -146,35 +149,26 @@ For comprehensive architecture documentation including component diagrams, data 
 ## 📦 Prerequisites
 
 ### System Requirements
-- **OS**: Linux (Ubuntu 20.04+ / CentOS 8+ / RHEL 8+)
-- **Kernel**: 4.15+ (for eBPF support)
+- **OS**: Linux (Ubuntu 20.04+)
+- **Kernel**: 5.x+ (for eBPF support)
 - **CephFS**: Client installed and mounted
 - **RAM**: 4 GB minimum, 8 GB recommended
-- **Storage**: 50 GB for PostgreSQL database
+- **Storage**: 10 GB free for database and binaries
 
 ### Software Dependencies
 ```bash
 # Ubuntu/Debian
-sudo apt-get update
-sudo apt-get install -y \
+sudo apt install -y \
+  postgresql postgresql-client \
   python3 python3-pip \
-  postgresql-13 postgresql-client-13 \
   bpfcc-tools python3-bpfcc \
   libcephfs-dev ceph-common \
   build-essential clang
-
-# CentOS/RHEL
-sudo yum install -y \
-  python3 python3-pip \
-  postgresql13-server postgresql13 \
-  bcc-tools python3-bcc \
-  libcephfs-devel ceph-common \
-  gcc clang
 ```
 
 ### Python Packages
 ```bash
-pip3 install psycopg2-binary bcc
+sudo apt install -y python3-psycopg2
 ```
 
 ### CephFS Pools
@@ -197,17 +191,13 @@ cd Storage-Tiering
 
 ### 2. Database Setup
 ```bash
-# Create database and user
-sudo -u postgres psql << EOF
-CREATE DATABASE tiering;
-CREATE USER tiering_user WITH PASSWORD 'your_password';
-GRANT ALL PRIVILEGES ON DATABASE tiering TO tiering_user;
-\c tiering
-GRANT ALL ON SCHEMA public TO tiering_user;
-EOF
+# Run automated setup script
+sudo bash scripts/setup_database.sh --db-pass 'your_password'
 
-# Deploy schema
-sudo -u postgres psql tiering < postgres/functions.txt
+# Verify installation
+sudo -u postgres psql tiering -c "SELECT COUNT(*) as tables FROM pg_tables WHERE schemaname='public';"
+sudo -u postgres psql tiering -c "SELECT COUNT(*) as functions FROM pg_proc JOIN pg_namespace ON pg_proc.pronamespace = pg_namespace.oid WHERE pg_namespace.nspname = 'public';"
+# Expected: 2 tables, 13 functions
 ```
 
 ### 3. Compile Migration Binary
@@ -228,6 +218,11 @@ sudo cp migration\ engine/cephfs-migration-worker.service /etc/systemd/system/
 # Update paths in service files (adjust to your installation directory)
 sudo nano /etc/systemd/system/cephfs-tracker.service
 # Edit: ExecStart=/usr/bin/python3 /path/to/tracker_phase1.py
+sudo nano /etc/systemd/system/cephfs-policy-engine.service
+# Edit: ExecStart=/usr/bin/python3 /path/to/policy_engine.py
+sudo nano /etc/systemd/system/cephfs-migration-worker.service
+# Edit: ExecStart=/usr/local/bin/libcephfs_migrate /path/to/migration_worker.py
+```
 
 # Reload and enable
 sudo systemctl daemon-reload

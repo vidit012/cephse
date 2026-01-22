@@ -8,7 +8,7 @@ set -euo pipefail
 DB_NAME="tiering"
 DB_USER="tiering_user"
 DB_PASS=""
-SCHEMA_PATH="postgres/schema.sql"
+SCHEMA_PATH="schema.sql"
 FORCE=0
 
 print_usage() {

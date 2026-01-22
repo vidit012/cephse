@@ -22,14 +22,14 @@ SET row_security = off;
 -- Name: public; Type: SCHEMA; Schema: -; Owner: -
 --
 
-CREATE SCHEMA public;
+-- CREATE SCHEMA public;  -- Skipped: public schema already exists in PostgreSQL
 
 
 --
 -- Name: SCHEMA public; Type: COMMENT; Schema: -; Owner: -
 --
 
-COMMENT ON SCHEMA public IS 'standard public schema';
+-- COMMENT ON SCHEMA public IS 'standard public schema';  -- Skipped: public schema already exists
 
 
 --
