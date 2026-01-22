@@ -109,8 +109,15 @@ eBPF (Kernel) → Access Tracker (Python) → Policy Engine (SQL) → Migration 
 ### Detailed Architecture
 
 For comprehensive architecture documentation including component diagrams, data flow, and design decisions, see:
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Complete system architecture
-- **[TECHNICAL_PRESENTATION.md](TECHNICAL_PRESENTATION.md)** - Technical deep dive
+
+**Visual Diagrams**:
+- **[Block Diagram](Architecture/block_diagram.png)** - High-level system overview
+- **[Detailed Architecture](Architecture/detailed.png)** - Component interactions and data flow
+- **[Flowchart](Architecture/flowchart.png)** - Process flow and decision logic
+
+**Documentation**:
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Complete system architecture and design rationale
+- **[TECHNICAL_PRESENTATION.md](TECHNICAL_PRESENTATION.md)** - Technical deep dive with algorithms and SQL functions
 
 ---
 
@@ -382,8 +389,10 @@ libcephfs_migrate /tiercephfs/file.txt cephfs.tiercephfs.cold
 
 ## 👥 Dvelopement
 
-Document version: 1.0.0
-Release Date : Jan 2026
+- Document version: 1.0.0
+- Release Date : Jan 2026
+
+
 
 ---
 
