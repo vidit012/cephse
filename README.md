@@ -288,19 +288,6 @@ sudo journalctl -u cephfs-tracker -f
 sudo journalctl -u cephfs-policy-engine -f
 sudo journalctl -u cephfs-migration-worker -f
 ```
-
-### Manual Operations
-```bash
-# Trigger aggregation manually
-sudo -u postgres psql tiering -c "SELECT aggregate_access_log();"
-
-# Run policy evaluation manually
-sudo -u postgres psql tiering -c "SELECT * FROM apply_tiering_policies();"
-
-# Migrate specific file
-libcephfs_migrate /tiercephfs/file.txt cephfs.tiercephfs.cold
-```
-
 ---
 
 ## 📚 Documentation
