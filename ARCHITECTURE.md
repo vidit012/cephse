@@ -471,7 +471,7 @@ Step 2: Copy Data
 │ Read original (4MB chunks)                   │
 │        ↓                                     │
 │ Write to shadow                              │
-│ Progress: [████████████████] 100%            │
+│         │
 └──────────────────────────────────────────────┘
 
 Step 3: Atomic Rename
@@ -491,7 +491,6 @@ Step 3: Atomic Rename
 4. **Rollback**: Can delete shadow if migration fails
 
 ---
-
 ## 🔐 Concurrency & Safety Mechanisms
 
 ### 1. eBPF Deduplication
@@ -601,22 +600,7 @@ After:  100 accesses = 1 INSERT query
 Speedup: 100x faster
 ```
 
-### 2. PostgreSQL Function Policy
-```
-Before: 
-  - Fetch 1M files to Python
-  - Loop in Python (slow)
-  - 100K individual UPDATE queries
-
-After:
-  - 1 function call
-  - Logic in database (native speed)
-  - 3 batch UPDATEs
-
-Speedup: 40x faster (1M files: 102s → 2.5s)
-```
-
-### 3. Parallel Migration
+### 2. Parallel Migration
 ```
 1 worker:  100 files × 2s = 200 seconds
 5 workers: 100 files × 2s = 40 seconds
@@ -665,38 +649,6 @@ except subprocess.TimeoutExpired:
 | CPU (tracker) | 50% | 100% | BCC Python overhead |
 
 ---
-
-## 🔧 Configuration & Tuning
-
-### Critical Parameters
-
-**eBPF Tracker**:
-```python
-AGGREGATE_INTERVAL = 60      # Aggregation frequency (seconds)
-buffer_max_size = 1000        # Batch flush size
-```
-
-**Policy Engine**:
-```python
-INTERVAL = 60                 # Policy check frequency (seconds)
-TEST_MODE = True              # 3 minutes = 30 days
-```
-
-**Migration Worker**:
-```python
-num_workers = 5               # Parallel migrations
-batch_size = 100              # Files per batch
-interval = 30                 # Check frequency (seconds)
-```
-
-**Database Thresholds**:
-```sql
-HIGH_SCORE_THRESHOLD = 0.7    -- 70% for hot files
-LOW_SCORE_THRESHOLD = 0.3     -- 30% for cold files
-```
-
----
-
 ## 🎭 Deployment Architecture
 
 ### Service Dependencies
@@ -709,23 +661,6 @@ cephfs-policy-engine.service
       ↓
 cephfs-migration-worker.service
 ```
-
-### File System Layout
-```
-/home/cephvm/tiering_system/
-├── src/
-│   ├── monitoring_ebpf_tracker.py  # eBPF tracker
-│   ├── policy_engine.py            # Policy engine
-│   ├── migration_worker.py         # Migration worker
-│   └── libcephfs_migrate           # C binary (compiled)
-├── *.service                       # systemd service files
-├── migrate_to_frequency_scoring.sql # Database schema
-└── README.md                       # Documentation
-```
-
-### Database Schema Deployment
-```bash
-psql tiering < migrate_to_frequency_scoring.sql
 ```
 
 ---
@@ -778,99 +713,7 @@ FROM file_metadata
 GROUP BY current_pool;"
 ```
 
-### End-to-End Test
-```bash
-# 1. Create file
-echo "test" > /tiercephfs/test.txt
-
-# 2. Trigger aggregation
-psql tiering -c "SELECT aggregate_access_log();"
-
-# 3. Verify tracking
-psql tiering -c "SELECT * FROM file_metadata WHERE path = 'test.txt';"
-
-# 4. Wait 3 minutes (test mode)
-# 5. Verify migration
-psql tiering -c "
-SELECT path, SUBSTRING(current_pool, 20) as pool 
-FROM file_metadata WHERE path = 'test.txt';"
-```
-
----
-
-## 🔮 Future Enhancements
-
-### 1. Recency Factor (Planned)
-```sql
--- Update calculate_score():
-recency_factor := 1.0 / (1.0 + EXTRACT(EPOCH FROM (NOW() - last_access_time)) / 3600);
-score := (0.90 * normalized_freq) + (0.10 * recency_factor);
-```
-
-### 2. Machine Learning Predictions
-- Train model on access patterns
-- Predict future access probability
-- Proactive migration decisions
-
-### 3. Multi-Cluster Support
-- Distributed database (Citus / Patroni)
-- Cross-cluster file tracking
-- Federated policy engine
-
-### 4. Real-time Dashboard
-- Grafana integration
-- Live migration visualization
-- Performance metrics
-
----
-
-## 📚 Documentation References
-
-- [README.md](README.md) - System overview and setup
-- [MIGRATION_FLOW.md](MIGRATION_FLOW.md) - Detailed migration process
-- [QUICK_REFERENCE.md](QUICK_REFERENCE.md) - Command reference
-- [OPTIMIZATION_SUMMARY.md](OPTIMIZATION_SUMMARY.md) - Performance optimizations
-- [FREQUENCY_SCORING_SUMMARY.md](FREQUENCY_SCORING_SUMMARY.md) - Scoring algorithm
-- [FIX_SUMMARY.txt](FIX_SUMMARY.txt) - Critical bug fixes applied
-
----
-
-## 🏆 System Status
-
-**Current State**: ✅ **Production Ready**
-
-**Verified Features**:
-- ✅ eBPF tracking captures all file access
-- ✅ Zero data loss during aggregation
-- ✅ Inode tracking through migrations
-- ✅ Timestamp preservation across pools
-- ✅ Parallel migration with no conflicts
-- ✅ Frequency-based scoring operational
-- ✅ All three services stable
-- ✅ Database consistency maintained
-
-**Performance Validated**:
-- ✅ 1000+ accesses/second handled
-- ✅ 100x faster writes (batch INSERT)
-- ✅ 40x faster policy execution
-- ✅ 5x faster migrations (parallel)
-
----
-
-## 👥 Architecture Diagram Legend
-
-| Symbol | Meaning |
-|--------|---------|
-| ↓ ↑    | Data flow direction |
-| ┌─┐    | Component boundary |
-| •      | Sub-component or feature |
-| →      | Action or transition |
-| ✓      | Validated/Completed |
-| ✗      | Error/Invalid |
-
----
 
 **Document Version**: 1.0  
-**Last Updated**: January 19, 2026  
+**Last Updated**: January 21, 2026  
 **System Version**: Production v1.0  
-**Author**: CephFS Tiering System Team
