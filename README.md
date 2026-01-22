@@ -331,7 +331,7 @@ libcephfs_migrate /tiercephfs/file.txt cephfs.tiercephfs.cold
 | **Granularity** | Per-file (inode-based) | Per-object | Per-row/partition | Per-blob (chunk-level) |
 | **Deployment** | Client-side (no cluster changes) | Cloud service (managed) | Database-integrated | Datacenter infrastructure |
 | **Cost Model** | Storage hardware cost | Pay per tier + transitions | Oracle licensing + storage | Internal (cost of downgrade) |
-| **Use Case** | HPC, shared filesystems, research | Cloud object storage, backups | Transactional databases, archives | Social media photos/videos |
+| **Use Case** | shared filesystems,Independent file systems | Cloud object storage, backups | Transactional databases, archives | Social media photos/videos |
 | **Transparency** | Fully transparent (files stay accessible) | API-based (requires application changes) | Transparent within Oracle | Transparent within Meta apps |
 | **Open Source** | Yes (can be deployed anywhere) | No (AWS proprietary) | No (Oracle proprietary) | No (Meta internal) |
 
@@ -357,59 +357,11 @@ libcephfs_migrate /tiercephfs/file.txt cephfs.tiercephfs.cold
 | **Granularity** | Per-file, per-access | Per-object request | Per-SQL statement | Per-blob operation |
 | **Scalability** | 10K events/sec per client | Unlimited (cloud-scale) | Database-limited | Petabyte-scale |
 
-#### Storage Backend Comparison
-
-| Feature | **PostgreSQL** | **MySQL** | **RocksDB** | **MongoDB** | **Cassandra** |
-|---------|----------------|-----------|-------------|-------------|---------------|
-| **Query Flexibility** | ✅ Full SQL, joins, aggregations | ✅ Full SQL | ❌ Key-value only | ⚡ JSON queries | ⚡ CQL (limited) |
-| **Write Performance** | 10K inserts/sec (our setup) | 8K inserts/sec | 50K+ inserts/sec | 15K inserts/sec | 100K+ inserts/sec |
-| **Complex Analytics** | ✅ Native (PL/pgSQL) | ✅ Native (stored procs) | ❌ Application-level | ⚡ Aggregation pipeline | ❌ Application-level |
-| **Transactions (ACID)** | ✅ Full ACID | ✅ Full ACID | ⚡ RocksDB-level only | ⚡ Document-level | ❌ Eventually consistent |
-| **Concurrency** | ✅ MVCC (multi-writer) | ⚡ Row-level locks | ❌ Single-writer | ✅ Multi-writer | ✅ Multi-writer |
-| **Operational Complexity** | Medium (standard DBA tools) | Medium (standard tools) | Low (embedded) | Medium (replica sets) | High (cluster management) |
-| **Index Types** | ✅ B-tree, Hash, GiST, GIN | ✅ B-tree, Hash | ⚡ LSM-tree only | ✅ Multiple types | ⚡ Secondary indexes |
-| **Memory Overhead** | 1-2 GB (our setup) | 1-2 GB | 500 MB - 1 GB | 2-4 GB | 4-8 GB (cluster) |
-| **Our Use Case Fit** | ✅ Excellent (complex queries) | ✅ Good (simpler than PG) | ⚡ Hot table only | ⚡ Good (JSON-heavy) | ❌ Overkill (distributed) |
-
-**Why PostgreSQL for This System**:
-1. **Complex policy queries**: `SELECT * FROM file_metadata WHERE last_access < NOW() - INTERVAL '3 minutes'` → native SQL
-2. **Analytics**: PL/pgSQL stored functions 40x faster than Python loops
-3. **Hot/cold table architecture**: Native table separation with different access patterns
-4. **Operational maturity**: Standard tools, monitoring, backups
-5. **ACID guarantees**: Critical for migration worker consistency
 
 **When to Use Alternatives**:
 - **RocksDB**: If write throughput exceeds 50K events/sec (use as hot-path cache)
-- **MySQL**: If team has MySQL expertise (similar performance for this workload)
 - **Cassandra**: If scaling to 100+ nodes with multi-datacenter replication
-- **MongoDB**: If file metadata has highly variable schema (not our case)
 
-#### Migration Technology Comparison
-
-| Technology | **libcephfs (C)** | **CephFS FUSE** | **S3 API** | **rsync** |
-|------------|-------------------|-----------------|------------|-----------|
-| **Performance** | ✅ Native (fastest) | ⚡ FUSE overhead (~20%) | N/A (different FS) | ⚡ Filesystem overhead |
-| **Pool Control** | ✅ Direct xattr: `ceph.file.layout.pool` | ❌ No pool API | N/A | ❌ No pool concept |
-| **Shadow File Support** | ✅ Atomic rename with pool change | ⚡ Rename only | N/A | ❌ Copy + delete |
-| **Inode Tracking** | ✅ Returns new inode | ⚡ Must stat() separately | N/A | ⚡ Must stat() |
-| **Error Handling** | ✅ Native error codes | ⚡ FUSE errors | N/A | ⚡ Exit codes |
-| **Integration** | C binary called from Python | Direct Python mount | N/A | Shell command |
-| **Why We Use It** | Direct CephFS pool manipulation, atomic rename, performance | - | - | - |
-
----
-
-### 3. Architecture Pattern Comparison
-
-| Pattern | **This System** | **Traditional HSM** | **Cloud-Native (S3)** |
-|---------|-----------------|---------------------|----------------------|
-| **Data Plane** | Client-side eBPF | Cluster-side scanning | Service-side logs |
-| **Control Plane** | PostgreSQL + Python | Centralized daemon | Managed service API |
-| **Policy Engine** | SQL functions (swappable) | Hard-coded C/C++ | Cloud service config |
-| **State Management** | Database (persistent) | Daemon memory (volatile) | Service-managed |
-| **Scalability** | Horizontal (add clients) | Vertical (cluster upgrade) | Unlimited (cloud) |
-| **Failure Recovery** | Systemd auto-restart | Manual intervention | Automatic (SLA-backed) |
-
----
 
 ## 🎯 Mode Selection Guide
 
