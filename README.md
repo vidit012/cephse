@@ -111,7 +111,7 @@ eBPF (Kernel) → Access Tracker (Python) → Policy Engine (SQL) → Migration 
 For comprehensive architecture documentation including component diagrams, data flow, and design decisions, see:
 
 **Visual Diagrams**:
-- **[Block Diagram](Architecture/block_diagram.png)** - High-level system overview
+- **[Block Diagram](Architecture/block%20diagram.png)** - High-level system overview
 - **[Detailed Architecture](Architecture/detailed.png)** - Component interactions and data flow
 - **[Flowchart](Architecture/flowchart.png)** - Process flow and decision logic
 
