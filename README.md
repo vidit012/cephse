@@ -324,10 +324,7 @@ libcephfs_migrate /tiercephfs/file.txt cephfs.tiercephfs.cold
 | **Storage Tiers** | 3 tiers: Hot (SSD), Warm (Hybrid), Cold (HDD) | 4 tiers: Frequent, Infrequent, Archive, Deep Archive | Unlimited (user-defined tablespaces) | 3 tiers: Hot (f4), Warm (BLOB), Cold (Glacier-like) |
 | **File System** | CephFS (POSIX, distributed) | S3 (object storage) | Oracle ASM / tablespaces | Tao/Haystack (proprietary) |
 | **Access Tracking** | eBPF kernel hooks (real-time, per-file) | S3 access logs (periodic, object-level) | Database statistics | Custom monitoring layer |
-| **Migration Speed** | 5+ parallel workers, immediate | Automatic, background (24-48h delay) | Scheduled or manual | Batch processing (hourly/daily) |
-| **Flexibility** | Switchable modes without data loss | Fixed algorithm | Policy-driven (SQL-based) | Hard-coded with ML tuning |
 | **Granularity** | Per-file (inode-based) | Per-object | Per-row/partition | Per-blob (chunk-level) |
-| **Deployment** | Client-side (no cluster changes) | Cloud service (managed) | Database-integrated | Datacenter infrastructure |
 | **Cost Model** | Storage hardware cost | Pay per tier + transitions | Oracle licensing + storage | Internal (cost of downgrade) |
 | **Use Case** | shared filesystems,Independent file systems | Cloud object storage, backups | Transactional databases, archives | Social media photos/videos |
 | **Transparency** | Fully transparent (files stay accessible) | API-based (requires application changes) | Transparent within Oracle | Transparent within Meta apps |
